@@ -38,7 +38,14 @@ function App() {
       let offset = 0;
       let allData: React.SetStateAction<any[]> = [];
       while (true) {
-        const response = await fetch(`/api/events?closed=false&limit=${limit}&offset=${offset}`);
+        const response = await fetch(`https://gamma-api.polymarket.com/events?closed=false&limit=${limit}&offset=${offset}`, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
+          mode: 'cors',
+        });
         const batch = await response.json();
         if (!batch || batch.length === 0) break;
         allData = allData.concat(batch);

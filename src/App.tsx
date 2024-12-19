@@ -63,6 +63,9 @@ function App() {
   // Cache for event data to prevent re-fetching
   const [eventDataCache, setEventDataCache] = useState<Map<string, any[]>>(new Map());
   
+  // Cache for noisy data visualizations - key: "eventId_marketKey_query", value: { data: noisyData, color: string }
+  const [noisyDataCache, setNoisyDataCache] = useState<Map<string, { data: any[], color: string }>>(new Map());
+  
   // Sentiment search state
   const [sentimentSearchTerm, setSentimentSearchTerm] = useState<string>('');
   const [filteredSentimentResults, setFilteredSentimentResults] = useState<SentimentResult[]>([]);
@@ -466,15 +469,6 @@ You must always return only a JSON array of 5 strings that match the above rules
       this.mode = mode;
     }
 
-    private formatDateForAPI(date: Date): string {
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      const hours = String(date.getHours()).padStart(2, '0');
-      const minutes = String(date.getMinutes()).padStart(2, '0');
-      const seconds = String(date.getSeconds()).padStart(2, '0');
-      return `${year}${month}${day}${hours}${minutes}${seconds}`;
-    }
 
     private buildQuery(baseQuery: string, source?: string, country?: string): string {
       let query = baseQuery;
@@ -834,6 +828,101 @@ You must always return only a JSON array of 5 strings that match the above rules
     return keywords.slice(0, 5); // Limit to 5 keywords
   }, []);
 
+  // Noise generation functions
+  // Box-Muller transform for Gaussian noise generation
+  const generateGaussianNoise = useCallback((): number => {
+    // Box-Muller transform
+    const u1 = Math.random();
+    const u2 = Math.random();
+    const z0 = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    return z0;
+  }, []);
+
+  // Generate random color for noisy lines
+  const generateRandomColor = useCallback(() => {
+    const colors = [
+      '#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#feca57',
+      '#ff9ff3', '#54a0ff', '#5f27cd', '#00d2d3', '#ff9f43',
+      '#ee5a24', '#0984e3', '#6c5ce7', '#a29bfe', '#fd79a8',
+      '#fdcb6e', '#e17055', '#00b894', '#e84393', '#2d3436'
+    ];
+    return colors[Math.floor(Math.random() * colors.length)];
+  }, []);
+
+  // Generate dramatically noisy data based on correlation percentage for a specific market
+  const generateNoisyData = useCallback((originalData: any[], correlationPercentage: number, query: string, targetMarketKey: string) => {
+    if (!originalData || originalData.length === 0) return [];
+
+    // More reasonable noise scaling based on correlation percentage
+    const minNoiseLevel = 0.1; // 10% minimum noise even at 100% correlation
+    const maxNoiseLevel = 1.5; // 150% maximum noise at 0% correlation
+    
+    // Use a more gradual scaling curve - only extreme at very low correlations
+    let correlationFactor;
+    if (correlationPercentage >= 70) {
+      // High correlations: very little noise
+      correlationFactor = (1 - correlationPercentage / 100) * 0.3;
+    } else if (correlationPercentage >= 40) {
+      // Medium correlations: moderate noise
+      correlationFactor = (1 - correlationPercentage / 100) * 0.7;
+    } else if (correlationPercentage >= 20) {
+      // Low correlations: high noise
+      correlationFactor = Math.pow(1 - correlationPercentage / 100, 1.5);
+    } else {
+      // Very low correlations: extreme noise
+      correlationFactor = Math.pow(1 - correlationPercentage / 100, 2.5);
+    }
+    
+    const baseNoiseLevel = minNoiseLevel + (maxNoiseLevel - minNoiseLevel) * correlationFactor;
+    
+    return originalData.map((point, index) => {
+      const noisyPoint = { ...point };
+      
+      // Only add noise to the specific target market key
+      if (point[targetMarketKey] !== undefined && typeof point[targetMarketKey] === 'number') {
+        const originalValue = point[targetMarketKey];
+        
+        // Multiple noise sources for more chaotic effect
+        const gaussianNoise1 = generateGaussianNoise();
+        const gaussianNoise2 = generateGaussianNoise();
+        const uniformNoise = (Math.random() * 2 - 1); // -1 to 1
+        
+        // Time-based noise for more realistic chaotic behavior
+        const timeNoise = Math.sin(index * 0.1) * 0.5;
+        
+        // Calculate different types of noise
+        const relativeNoise = gaussianNoise1 * baseNoiseLevel * originalValue;
+        const absoluteNoise = gaussianNoise2 * baseNoiseLevel * 0.5; // Absolute noise
+        const uniformNoiseComponent = uniformNoise * baseNoiseLevel * 0.3;
+        const timeBasedNoise = timeNoise * baseNoiseLevel * 0.2;
+        
+        // Moderate scaling for very low correlations
+        let extremeMultiplier = 1;
+        if (correlationPercentage < 20) extremeMultiplier = 1.5;
+        if (correlationPercentage < 10) extremeMultiplier = 2.5;
+        if (correlationPercentage < 5) extremeMultiplier = 4;
+        
+        // Combine all noise sources
+        const totalNoise = (relativeNoise + absoluteNoise + uniformNoiseComponent + timeBasedNoise) * extremeMultiplier;
+        
+        // Add some random spikes for very low correlations
+        let spikeNoise = 0;
+        if (correlationPercentage < 5 && Math.random() < 0.05) {
+          spikeNoise = (Math.random() * 2 - 1) * 0.3; // Random spikes (reduced frequency and intensity)
+        }
+        
+        const finalValue = originalValue + totalNoise + spikeNoise;
+        noisyPoint[targetMarketKey] = Math.max(0, Math.min(1, finalValue));
+      }
+      
+      // Add query information for labeling
+      noisyPoint.query = query;
+      noisyPoint.isNoisy = true;
+      
+      return noisyPoint;
+    });
+  }, [generateGaussianNoise]);
+
   // Link sentiment functionality
   const linkSentiment = useCallback((result: SentimentResult) => {
     if (!currentEvent) return;
@@ -917,6 +1006,28 @@ You must always return only a JSON array of 5 strings that match the above rules
       return updated;
     });
     
+    // Clear noisy data cache for this specific query
+    const isSingleMarket = currentMarkets.length === 1;
+    let targetMarketKey: string;
+    
+    if (isSingleMarket) {
+      const availableKeys = Object.keys(chartData[0] || {}).filter(key => key !== 'timestamp');
+      targetMarketKey = availableKeys[0] || 'Yes';
+    } else {
+      const marketIndex = currentMarkets.findIndex(market => 
+        market.id === result.marketId || market.question === result.marketQuestion
+      );
+      targetMarketKey = marketIndex >= 0 ? `series${marketIndex}` : 'series0';
+    }
+    
+    const noisyCacheKey = `${eventId}_${targetMarketKey}_${result.gdeltQuery}`;
+    setNoisyDataCache(prevCache => {
+      const newCache = new Map(prevCache);
+      newCache.delete(noisyCacheKey);
+      console.log('🗑️ Cleared noisy data cache for:', noisyCacheKey);
+      return newCache;
+    });
+    
     // Update the cache with the new linking state
     const cacheKey = currentMarkets.slice(0, 5).map(m => m.id || m.question).join('_');
     console.log('🔗 Updating cache for unlink, key:', cacheKey);
@@ -946,6 +1057,85 @@ You must always return only a JSON array of 5 strings that match the above rules
     return data;
   }, [allTimeSeries, createOptimizedDataset, currentMarkets.length, selectedInterval]);
 
+  // Generate noisy data for ALL linked sentiments with caching
+  const noisyChartData = useMemo(() => {
+    if (!currentEvent || !chartData || chartData.length === 0) return [];
+    
+    const eventId = currentEvent.id;
+    const linkedPairsForEvent = linkedPairs.get(eventId) || [];
+    
+    if (linkedPairsForEvent.length === 0) return [];
+    
+    // Process ALL linked pairs, not just the first one
+    const noisyDataSets = linkedPairsForEvent.map(linkedPair => {
+      // Find the sentiment result to get the correlation percentage
+      const sentimentResult = sentimentResults.find(r => 
+        r.marketId === linkedPair.marketId && r.gdeltQuery === linkedPair.gdeltQuery
+      );
+      
+      if (!sentimentResult) return null;
+      
+      // Determine the target market key based on the market structure
+      const isSingleMarket = currentMarkets.length === 1;
+      let targetMarketKey: string;
+      
+      if (isSingleMarket) {
+        // For single market, we need to find which outcome (Yes/No) corresponds to the linked market
+        // For now, we'll use the first available key that's not timestamp
+        const availableKeys = Object.keys(chartData[0] || {}).filter(key => key !== 'timestamp');
+        targetMarketKey = availableKeys[0] || 'Yes'; // Default to 'Yes' if no keys found
+      } else {
+        // For multiple markets, find the market index that matches the linked market
+        const marketIndex = currentMarkets.findIndex(market => 
+          market.id === linkedPair.marketId || market.question === linkedPair.marketQuestion
+        );
+        targetMarketKey = marketIndex >= 0 ? `series${marketIndex}` : 'series0';
+      }
+      
+      // Create cache key
+      const cacheKey = `${eventId}_${targetMarketKey}_${linkedPair.gdeltQuery}`;
+      
+      // Check if we have cached noisy data
+      const cachedNoisyData = noisyDataCache.get(cacheKey);
+      if (cachedNoisyData && cachedNoisyData.data.length > 0) {
+        console.log('✅ Using cached noisy data for:', cacheKey);
+        return {
+          data: cachedNoisyData.data,
+          color: cachedNoisyData.color,
+          query: linkedPair.gdeltQuery,
+          targetMarketKey,
+          correlation: sentimentResult.correlation
+        };
+      }
+      
+      // Generate random color for this noisy line
+      const randomColor = generateRandomColor();
+      
+      // Generate noisy data based on the correlation percentage for the specific market
+      const noisyData = generateNoisyData(chartData, sentimentResult.correlation, linkedPair.gdeltQuery, targetMarketKey);
+      
+      // Cache the noisy data with its color
+      if (noisyData.length > 0) {
+        setNoisyDataCache(prevCache => {
+          const newCache = new Map(prevCache);
+          newCache.set(cacheKey, { data: noisyData, color: randomColor });
+          console.log('💾 Cached noisy data with color for:', cacheKey, 'Color:', randomColor);
+          return newCache;
+        });
+      }
+      
+      return {
+        data: noisyData,
+        color: randomColor,
+        query: linkedPair.gdeltQuery,
+        targetMarketKey,
+        correlation: sentimentResult.correlation
+      };
+    }).filter(Boolean); // Remove null entries
+    
+    return noisyDataSets;
+  }, [chartData, currentEvent, linkedPairs, sentimentResults, generateNoisyData, currentMarkets, noisyDataCache, generateRandomColor]);
+
   // Memoize the entire chart component with responsive tooltip
   const renderTimeSeriesGraph = useMemo(() => {
     if (allTimeSeries.length === 0) return null;
@@ -956,6 +1146,8 @@ You must always return only a JSON array of 5 strings that match the above rules
     const colors = isSingleMarket 
       ? ['#10b981', '#ef4444'] // Green for Yes, Red for No
       : ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
+    
+    // Noisy data is now an array of datasets, each with its own color
 
     const customTooltip = ({ active, payload, label }: any) => {
       if (active && payload && payload.length) {
@@ -974,6 +1166,33 @@ You must always return only a JSON array of 5 strings that match the above rules
             {payload
               .filter((entry: any) => entry.value !== undefined)
               .map((entry: any, index: number) => {
+                // Check if this is a noisy line by checking if the color matches any noisy dataset
+                const noisyDataset = noisyChartData.find(dataset => dataset && dataset.color === entry.color);
+                
+                if (noisyDataset) {
+                  // Handle noisy line tooltip
+                  const probability = (entry.value * 100).toFixed(1);
+                  return (
+                    <div key={index} className="flex items-center justify-between py-1">
+                      <div className="flex items-center space-x-2">
+                        <div 
+                          className="w-2 h-2 rounded-full" 
+                          style={{ backgroundColor: entry.color }}
+                        />
+                        <span className="text-white/60 text-xs italic truncate max-w-[120px]">
+                          Query: {noisyDataset.query.length > 20 
+                            ? `${noisyDataset.query.substring(0, 20)}...` 
+                            : noisyDataset.query} ({noisyDataset.correlation.toFixed(1)}%)
+                        </span>
+                      </div>
+                      <span className="text-white font-medium text-xs ml-2">
+                        {probability}%
+                      </span>
+                    </div>
+                  );
+                }
+                
+                // Handle regular series tooltip
                 let series;
                 if (isSingleMarket) {
                   // For single market, use the dataKey directly (Yes/No)
@@ -1078,7 +1297,21 @@ You must always return only a JSON array of 5 strings that match the above rules
                 />
                 <Tooltip content={customTooltip} />
                 <Legend 
-                  formatter={(value) => {
+                  formatter={(value, entry) => {
+                    // Check if this is a noisy line entry by checking if the color matches any noisy dataset
+                    const noisyDataset = noisyChartData.find(dataset => dataset && dataset.color === entry?.color);
+                    
+                    if (noisyDataset) {
+                      return (
+                        <span className="text-sm text-white/60 italic">
+                          Query: {noisyDataset.query.length > 30 
+                            ? `${noisyDataset.query.substring(0, 30)}...` 
+                            : noisyDataset.query} ({noisyDataset.correlation.toFixed(1)}%)
+                        </span>
+                      );
+                    }
+                    
+                    // Regular series legend
                     let series;
                     if (isSingleMarket) {
                       // For single market, use the value directly (Yes/No)
@@ -1113,6 +1346,28 @@ You must always return only a JSON array of 5 strings that match the above rules
                     filter="drop-shadow(0 0 6px rgba(99, 102, 241, 0.3))"
                   />
                 ))}
+                
+                {/* Add noisy data as dotted lines for ALL linked markets */}
+                {noisyChartData.filter(dataset => dataset).map((noisyDataset, index) => {
+                  if (!noisyDataset) return null;
+                  return (
+                    <Line
+                      key={`noisy-${index}-${noisyDataset.query}`}
+                      type="monotone"
+                      dataKey={noisyDataset.targetMarketKey}
+                      data={noisyDataset.data}
+                      stroke={noisyDataset.color}
+                      strokeWidth={1.5}
+                      strokeDasharray="5 5"
+                      dot={false}
+                      connectNulls={true}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      isAnimationActive={false}
+                      opacity={0.8}
+                    />
+                  );
+                })}
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -1190,7 +1445,7 @@ You must always return only a JSON array of 5 strings that match the above rules
         </div>
       </div>
     );
-  }, [allTimeSeries, chartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, currentEvent, addToWatchlist, isInWatchlist, currentMarkets.length]);
+  }, [allTimeSeries, chartData, noisyChartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, currentEvent, addToWatchlist, isInWatchlist, currentMarkets.length, linkedPairs, noisyDataCache, currentMarkets]);
 
   // Modified click handler to store current markets and event
   const handleItemClick = useCallback((item: any) => {
@@ -1401,6 +1656,7 @@ You must always return only a JSON array of 5 strings that match the above rules
                         </>
                       )}
                     </button>
+
                     
                     {/* Tooltip for inactive button */}
                     {!isInWatchlist(currentEvent?.id || '') && (
@@ -1467,6 +1723,26 @@ You must always return only a JSON array of 5 strings that match the above rules
                     <span className="text-white font-medium  group-hover:text-white/90 transition-colors">{item.title}</span>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+          
+          {/* Welcome Screen */}
+          {!currentEvent && searchResults.length === 0 && searchTerm.length === 0 && (
+            <div className="flex items-center justify-center h-96">
+              <div className="text-center">
+                <h1 className="text-8xl font-bold mb-8 bg-gradient-to-r from-purple-400 via-pink-500 to-red-500 bg-clip-text text-transparent animate-pulse relative">
+                  <span className="relative z-10">SHAMAN</span>
+                  <div className="absolute inset-0 bg-gradient-to-r from-purple-400 via-pink-500 to-red-500 bg-clip-text text-transparent animate-ping opacity-20"></div>
+                  <div className="absolute inset-0 bg-gradient-to-r from-purple-400 via-pink-500 to-red-500 bg-clip-text text-transparent animate-pulse opacity-40"></div>
+                </h1>
+                <div className="text-2xl text-white/80 mb-4 animate-bounce">
+                  Say hello to Shaman
+                </div>
+                <div className="w-32 h-1 bg-gradient-to-r from-purple-400 via-pink-500 to-red-500 mx-auto rounded-full animate-pulse"></div>
+                <div className="mt-8 text-sm text-white/40 animate-pulse">
+                  Beat prediction markets with AI-powered sentiment analysis. Search to get started :D
+                </div>
               </div>
             </div>
           )}
