@@ -69,10 +69,13 @@ function App() {
                   console.log(`\n=== Event: ${item.title || 'Untitled Event'} ===`);
                   
                   if (item.markets && item.markets.length > 0) {
-                    item.markets.forEach((market: { question: any; clobTokenIds: any; }, index: number) => {
+                    item.markets.forEach((market: { question: any; clobTokenIds: any; groupItemTitle: any; outcomePrices: any; volumeNum: any;}, index: number) => {
                       console.log(`Market ${index + 1}:`);
                       console.log(`  Question: ${market.question || 'No question available'}`);
-                      console.log(`  CLOB Token IDs: ${market.clobTokenIds || 'No CLOB IDs available'}`);
+                      // console.log(`  CLOB Token IDs: ${market.clobTokenIds || 'No CLOB IDs available'}`);
+                      console.log(`  Group Item Title: ${market.groupItemTitle || 'No group item titles available'}`);
+                      console.log(`  Probability: ${JSON.parse(market.outcomePrices)[0]*100 || 'No probabilities available'}`);
+                      console.log(`  Volume: $${market.volumeNum.toFixed(0) || 'No volume available'}`);
                     });
                   } else {
                     console.log('No markets found for this event');
