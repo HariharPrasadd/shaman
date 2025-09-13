@@ -12,6 +12,19 @@ function App() {
   const [allTimeSeries, setAllTimeSeries] = useState<any[]>([]);
   const [loadingPrices, setLoadingPrices] = useState<boolean>(false);
   const [selectedEventTitle, setSelectedEventTitle] = useState<string | null>(null);
+  
+  // New state for interval selection
+  const [selectedInterval, setSelectedInterval] = useState('1m');
+  const [currentMarkets, setCurrentMarkets] = useState<any[]>([]);
+
+  // Interval configurations
+  const intervalConfigs = {
+    '1m': { interval: '1m', fidelity: '180' },
+    '1h': { interval: '1h', fidelity: '1' },
+    '6h': { interval: '6h', fidelity: '1' },
+    '1d': { interval: '1d', fidelity: '5' },
+    '1w': { interval: '1w', fidelity: '60' }
+  };
 
   useEffect(() => {
     const fetchAll = async () => {
@@ -56,10 +69,9 @@ function App() {
     setSearchResults(value.length === 0 ? [] : debouncedSearchResults);
   }, [debouncedSearchResults]);
 
-  // Optimized price history fetching with reduced fidelity for speed
+  // Modified price history fetching to accept interval and fidelity parameters
   const fetchPriceHistory = useCallback(async (clobID: string, interval = '1m', fidelity='180') => {
     try {
-      // Reduced fidelity and interval for much faster loading
       const response = await fetch(
         `https://clob.polymarket.com/prices-history?market=${clobID}&interval=${interval}&fidelity=${fidelity}`
       );
@@ -89,10 +101,11 @@ function App() {
 
     if (!referenceSeries || referenceSeries.history.length === 0) return [];
 
-    // Use the reference series timestamps and downsample for performance
+    // Use the reference series timestamps and downsample for performance (except for shorter intervals)
+    const shouldDownsample = selectedInterval === '1w' || selectedInterval === '1d';
     const timestamps = referenceSeries.history
       .map((point: any) => point.t * 1000)
-      .filter((_: any, index: number) => index % 2 === 0) // Downsample by 50% for performance
+      .filter((_: any, index: number) => !shouldDownsample || index % 2 === 0)
       .sort((a: number, b: number) => a - b);
 
     const chartData = timestamps.map((timestamp: number) => {
@@ -116,17 +129,17 @@ function App() {
     });
 
     return chartData;
-  }, []);
+  }, [selectedInterval]);
 
-  // Modified to return top 5 series with highest p values
-  const fetchAndGraphMultipleTimeSeries = useCallback(async (markets: any[]) => {
+  // Modified to use selected interval and fidelity
+  const fetchAndGraphMultipleTimeSeries = useCallback(async (markets: any[], interval: string = '1m', fidelity: string = '180') => {
     try {
       setLoadingPrices(true);
       
-      // Fetch all series data
+      // Fetch all series data with specified interval and fidelity
       const allSeriesPromises = markets.map(async (market) => {
         const clobIds = JSON.parse(market.clobTokenIds);
-        const priceData = await fetchPriceHistory(clobIds[0]);
+        const priceData = await fetchPriceHistory(clobIds[0], interval, fidelity);
         
         if (priceData?.history?.length > 0) {
           return {
@@ -158,6 +171,15 @@ function App() {
       setLoadingPrices(false);
     }
   }, [fetchPriceHistory]);
+
+  // New handler for interval changes
+  const handleIntervalChange = useCallback((interval: string) => {
+    setSelectedInterval(interval);
+    if (currentMarkets.length > 0) {
+      const config = intervalConfigs[interval as keyof typeof intervalConfigs];
+      fetchAndGraphMultipleTimeSeries(currentMarkets, config.interval, config.fidelity);
+    }
+  }, [currentMarkets, fetchAndGraphMultipleTimeSeries, intervalConfigs]);
 
   // Memoize chart data to prevent recalculation on every render
   const chartData = useMemo(() => {
@@ -210,10 +232,30 @@ function App() {
 
     return (
       <div className="w-full mt-8 bg-gray-900 p-6 rounded-lg">
-        <h3 className="text-white text-xl font-bold mb-4">
-          {selectedEventTitle || 'Price History'}
-          {loadingPrices && <span className="ml-2 text-sm text-gray-400">Loading...</span>}
-        </h3>
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-white text-xl font-bold">
+            {selectedEventTitle || 'Price History'}
+            {loadingPrices && <span className="ml-2 text-sm text-gray-400">Loading...</span>}
+          </h3>
+          
+          {/* Interval buttons */}
+          <div className="flex gap-2">
+            {['1h', '6h', '1d', '1w', '1m'].map((interval) => (
+              <button
+                key={interval}
+                onClick={() => handleIntervalChange(interval)}
+                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                  selectedInterval === interval
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                }`}
+              >
+                {interval}
+              </button>
+            ))}
+          </div>
+        </div>
+        
         <ResponsiveContainer width="100%" height={500}>
           <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -287,9 +329,9 @@ function App() {
         )}
       </div>
     );
-  }, [allTimeSeries, chartData, loadingPrices, selectedEventTitle]);
+  }, [allTimeSeries, chartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, intervalConfigs]);
 
-  // Optimized click handler
+  // Modified click handler to store current markets
   const handleItemClick = useCallback((item: any) => {
     console.log(`\n=== Event: ${item.title || 'Untitled Event'} ===`);
     
@@ -298,9 +340,11 @@ function App() {
     setSelectedEventTitle(item.title || 'Untitled Event');
     
     if (item.markets && item.markets.length > 0) {
-      fetchAndGraphMultipleTimeSeries(item.markets);
+      setCurrentMarkets(item.markets);
+      const config = intervalConfigs[selectedInterval as keyof typeof intervalConfigs];
+      fetchAndGraphMultipleTimeSeries(item.markets, config.interval, config.fidelity);
     }
-  }, [fetchAndGraphMultipleTimeSeries]);
+  }, [fetchAndGraphMultipleTimeSeries, selectedInterval, intervalConfigs]);
 
   return (
     <div className="flex flex-col items-center p-4">
