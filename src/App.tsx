@@ -261,8 +261,12 @@ function App() {
   const renderTimeSeriesGraph = useMemo(() => {
     if (allTimeSeries.length === 0) return null;
 
+    const isSingleMarket = currentMarkets.length === 1;
+    
     // Fey-inspired color palette - more subtle and professional
-    const colors = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
+    const colors = isSingleMarket 
+      ? ['#10b981', '#ef4444'] // Green for Yes, Red for No
+      : ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 
     const customTooltip = ({ active, payload, label }: any) => {
       if (active && payload && payload.length) {
@@ -281,8 +285,15 @@ function App() {
             {payload
               .filter((entry: any) => entry.value !== undefined)
               .map((entry: any, index: number) => {
-                const seriesIndex = parseInt(entry.dataKey.replace('series', ''));
-                const series = allTimeSeries[seriesIndex];
+                let series;
+                if (isSingleMarket) {
+                  // For single market, use the dataKey directly (Yes/No)
+                  series = allTimeSeries.find(s => s.groupItemTitle === entry.dataKey);
+                } else {
+                  const seriesIndex = parseInt(entry.dataKey.replace('series', ''));
+                  series = allTimeSeries[seriesIndex];
+                }
+                
                 if (series) {
                   const probability = (entry.value * 100).toFixed(1);
                   return (
@@ -385,8 +396,14 @@ function App() {
                 <Tooltip content={customTooltip} />
                 <Legend 
                   formatter={(value) => {
-                    const seriesIndex = parseInt(value.replace('series', ''));
-                    const series = allTimeSeries[seriesIndex];
+                    let series;
+                    if (isSingleMarket) {
+                      // For single market, use the value directly (Yes/No)
+                      series = allTimeSeries.find(s => s.groupItemTitle === value);
+                    } else {
+                      const seriesIndex = parseInt(value.replace('series', ''));
+                      series = allTimeSeries[seriesIndex];
+                    }
                     return series ? (
                       <span className="text-sm  text-white/80">
                         {series.groupItemTitle || "Yes"} ({(series.latestPrice * 100).toFixed(1)}%)
@@ -402,7 +419,7 @@ function App() {
                   <Line
                     key={index}
                     type="monotone"
-                    dataKey={`series${index}`}
+                    dataKey={isSingleMarket ? allTimeSeries[index].groupItemTitle : `series${index}`}
                     stroke={colors[index % colors.length]}
                     strokeWidth={2.5}
                     dot={false}
@@ -419,7 +436,7 @@ function App() {
           
           {/* Market summary cards with Fey-inspired design */}
           {allTimeSeries.length > 0 && (
-            <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            <div className={`mt-6 grid gap-3 ${isSingleMarket ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-5'}`}>
               {allTimeSeries.map((series, index) => (
                 <div 
                   key={index} 
@@ -490,7 +507,7 @@ function App() {
         </div>
       </div>
     );
-  }, [allTimeSeries, chartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, currentEvent, addToWatchlist, isInWatchlist]);
+  }, [allTimeSeries, chartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, currentEvent, addToWatchlist, isInWatchlist, currentMarkets.length]);
 
   // Modified click handler to store current markets and event
   const handleItemClick = useCallback((item: any) => {
