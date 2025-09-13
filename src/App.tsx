@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import Fuse from "fuse.js";
 
 function App() {
   const [data, setData] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [searchResults, setSearchResults] = useState(data);
 
   useEffect(() => {
     const fetchAll = async () => {
@@ -23,9 +25,52 @@ function App() {
     fetchAll().catch(err => setError(err.message));
   }, []);
 
+  const options = {
+    includeScore: true,
+    includeMatches: true,
+    threshold: 0.2,
+    keys: ["title"],
+  }
 
+  const fuse = new Fuse(data, options);
+
+  const handleSearch = (event: { target: { value: any; }; }) => {
+    const { value } = event.target;
+
+    // If the user searched for an empty string,
+    // display all data.
+    if (value.length === 0) {
+      setSearchResults([]);
+      return;
+    }
+
+    const results = fuse.search(value);
+    const items = results.map((result) => result.item);
+    setSearchResults(items);
+  };
+  
   return (
     <div>
+      <input
+        type="text"
+        placeholder="Search for Polymarket events"
+        onChange={handleSearch}
+      />
+      <table>
+      <thead>
+        <tr>
+          <th>Title</th>
+        </tr>
+      </thead>
+      <tbody>
+          {searchResults.map(item => (
+            <tr key={item.id}>
+              <td>{item.title}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
       {error && <p className="text-red-500">Error: {error}</p>}
       {data.length > 0 ? (
         data.map((item, index) => (
