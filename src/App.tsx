@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import Fuse from "fuse.js";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { X, Plus, TrendingUp, DollarSign, Menu, ChevronLeft, Search } from 'lucide-react';
+import { X, Plus, TrendingUp, DollarSign, Search } from 'lucide-react';
 
 function App() {
   const [data, setData] = useState<any[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState(data);
   const [searchTerm, setSearchTerm] = useState('');
   
@@ -22,8 +21,7 @@ function App() {
   // Watchlist state
   const [watchlist, setWatchlist] = useState<any[]>([]);
   
-  // Sidebar state - only left sidebar is collapsible
-  const [leftSidebarOpen, setLeftSidebarOpen] = useState(true);
+  // Left sidebar is now always open (persistent)
 
   // Interval configurations
   const intervalConfigs = {
@@ -49,7 +47,7 @@ function App() {
       }
       setData(allData);
     };
-    fetchAll().catch(err => setError(err.message));
+    fetchAll().catch(err => console.error('Failed to fetch data:', err));
   }, []);
 
   // Memoize Fuse instance to avoid recreating it on every render
@@ -97,8 +95,8 @@ function App() {
     }
   }, []);
 
-  // Modified to create dataset for top 5 series
-  const createOptimizedDataset = useCallback((allSeries: any[]) => {
+  // Modified to create dataset for top 5 series or single market with two CLOB IDs
+  const createOptimizedDataset = useCallback((allSeries: any[], isSingleMarket: boolean = false) => {
     if (allSeries.length === 0) return [];
 
     // Get the series with the most data points to use as timestamp reference
@@ -129,7 +127,12 @@ function App() {
               ? current : closest;
           });
           
-          dataPoint[`series${seriesIndex}`] = closestPoint.p;
+          if (isSingleMarket) {
+            // For single market, use "Yes" and "No" labels
+            dataPoint[seriesIndex === 0 ? 'Yes' : 'No'] = closestPoint.p;
+          } else {
+            dataPoint[`series${seriesIndex}`] = closestPoint.p;
+          }
         }
       });
       
@@ -144,34 +147,78 @@ function App() {
     try {
       setLoadingPrices(true);
       
-      // Fetch all series data with specified interval and fidelity
-      const allSeriesPromises = markets.map(async (market) => {
-        const clobIds = JSON.parse(market.clobTokenIds);
-        const priceData = await fetchPriceHistory(clobIds[0], interval, fidelity);
-        
-        if (priceData?.history?.length > 0) {
-          return {
-            question: market.question,
-            clobTokenIds: market.clobTokenIds,
-            groupItemTitle: market.groupItemTitle,
-            outcomePrices: JSON.parse(market.outcomePrices)[0],
-            volumeNum: market.volumeNum,
-            history: priceData.history,
-            latestPrice: priceData.history[priceData.history.length - 1].p
-          };
-        }
-        return null;
-      });
-
-      const allSeries = (await Promise.all(allSeriesPromises)).filter(Boolean) as Array<NonNullable<typeof markets[0]>>;
+      // Check if there's only one market (yes/no market)
+      const isSingleMarket = markets.length === 1;
       
-      // Filter out any null or undefined series just in case, then sort by latest price
-      const validSeries = allSeries.filter((series): series is typeof allSeries[0] & { latestPrice: number } => !!series && typeof series.latestPrice === 'number');
-      const top5Series = validSeries
-        .sort((a, b) => b.latestPrice - a.latestPrice)
-        .slice(0, 5);
+      if (isSingleMarket) {
+        // For single market, fetch both CLOB IDs (Yes and No)
+        const market = markets[0];
+        const clobIds = JSON.parse(market.clobTokenIds);
+        
+        if (clobIds.length >= 2) {
+          const [yesPriceData, noPriceData] = await Promise.all([
+            fetchPriceHistory(clobIds[0], interval, fidelity),
+            fetchPriceHistory(clobIds[1], interval, fidelity)
+          ]);
+          
+          const allSeries = [];
+          
+          if (yesPriceData?.history?.length > 0) {
+            allSeries.push({
+              question: market.question,
+              clobTokenIds: market.clobTokenIds,
+              groupItemTitle: "Yes",
+              outcomePrices: JSON.parse(market.outcomePrices)[0],
+              volumeNum: market.volumeNum,
+              history: yesPriceData.history,
+              latestPrice: yesPriceData.history[yesPriceData.history.length - 1].p
+            });
+          }
+          
+          if (noPriceData?.history?.length > 0) {
+            allSeries.push({
+              question: market.question,
+              clobTokenIds: market.clobTokenIds,
+              groupItemTitle: "No",
+              outcomePrices: JSON.parse(market.outcomePrices)[1],
+              volumeNum: market.volumeNum,
+              history: noPriceData.history,
+              latestPrice: noPriceData.history[noPriceData.history.length - 1].p
+            });
+          }
+          
+          setAllTimeSeries(allSeries);
+        }
+      } else {
+        // Original logic for multiple markets
+        const allSeriesPromises = markets.map(async (market) => {
+          const clobIds = JSON.parse(market.clobTokenIds);
+          const priceData = await fetchPriceHistory(clobIds[0], interval, fidelity);
+          
+          if (priceData?.history?.length > 0) {
+            return {
+              question: market.question,
+              clobTokenIds: market.clobTokenIds,
+              groupItemTitle: market.groupItemTitle,
+              outcomePrices: JSON.parse(market.outcomePrices)[0],
+              volumeNum: market.volumeNum,
+              history: priceData.history,
+              latestPrice: priceData.history[priceData.history.length - 1].p
+            };
+          }
+          return null;
+        });
 
-      setAllTimeSeries(top5Series);
+        const allSeries = (await Promise.all(allSeriesPromises)).filter(Boolean) as Array<NonNullable<typeof markets[0]>>;
+        
+        // Filter out any null or undefined series just in case, then sort by latest price
+        const validSeries = allSeries.filter((series): series is typeof allSeries[0] & { latestPrice: number } => !!series && typeof series.latestPrice === 'number');
+        const top5Series = validSeries
+          .sort((a, b) => b.latestPrice - a.latestPrice)
+          .slice(0, 5);
+
+        setAllTimeSeries(top5Series);
+      }
       
     } catch (error) {
       console.error('Error fetching multiple time series:', error);
@@ -206,8 +253,9 @@ function App() {
 
   // Memoize chart data to prevent recalculation on every render
   const chartData = useMemo(() => {
-    return createOptimizedDataset(allTimeSeries);
-  }, [allTimeSeries, createOptimizedDataset]);
+    const isSingleMarket = currentMarkets.length === 1;
+    return createOptimizedDataset(allTimeSeries, isSingleMarket);
+  }, [allTimeSeries, createOptimizedDataset, currentMarkets.length]);
 
   // Memoize the entire chart component with responsive tooltip
   const renderTimeSeriesGraph = useMemo(() => {
@@ -245,7 +293,7 @@ function App() {
                           style={{ backgroundColor: entry.color }}
                         />
                         <span className="text-white/90 text-xs truncate max-w-[120px]">
-                          {series.groupItemTitle}
+                          {series.groupItemTitle || "Yes"}
                         </span>
                       </div>
                       <span className="text-white font-medium text-xs ml-2">
@@ -267,13 +315,13 @@ function App() {
         <div className="bg-gradient-to-br from-slate-900/50 to-slate-800/30 border border-white/5 rounded-2xl p-6 backdrop-blur-sm">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between mb-6 space-y-4 lg:space-y-0">
             <div>
-              <h3 className="text-white text-2xl font-semibold font-['Inter'] tracking-tight">
+              <h3 className="text-white text-2xl font-semibold  tracking-tight">
                 {selectedEventTitle || 'Price History'}
               </h3>
               {loadingPrices && (
                 <div className="flex items-center mt-2">
                   <div className="animate-spin w-4 h-4 border-2 border-white/20 border-t-white rounded-full mr-2" />
-                  <span className="text-white/60 text-sm font-['Inter']">Loading market data...</span>
+                  <span className="text-white/60 text-sm ">Loading market data...</span>
                 </div>
               )}
             </div>
@@ -284,7 +332,7 @@ function App() {
                 <button
                   key={interval}
                   onClick={() => handleIntervalChange(interval)}
-                  className={`inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium font-['Inter'] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 ${
+                  className={`inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium  ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 ${
                     selectedInterval === interval
                       ? 'bg-white text-black shadow-sm'
                       : 'text-white/70 hover:bg-white/10 hover:text-white'
@@ -340,8 +388,8 @@ function App() {
                     const seriesIndex = parseInt(value.replace('series', ''));
                     const series = allTimeSeries[seriesIndex];
                     return series ? (
-                      <span className="text-sm font-['Inter'] text-white/80">
-                        {series.groupItemTitle} ({(series.latestPrice * 100).toFixed(1)}%)
+                      <span className="text-sm  text-white/80">
+                        {series.groupItemTitle || "Yes"} ({(series.latestPrice * 100).toFixed(1)}%)
                       </span>
                     ) : value;
                   }}
@@ -385,23 +433,23 @@ function App() {
                         boxShadow: `0 0 12px ${colors[index % colors.length]}40`
                       }}
                     />
-                    <span className="text-white/50 text-xs font-['Inter'] font-medium">
+                    <span className="text-white/50 text-xs  font-medium">
                       #{index + 1}
                     </span>
                   </div>
-                  <h4 className="text-white font-semibold text-sm font-['Inter'] leading-tight mb-3 line-clamp-2 group-hover:text-white/90 transition-colors">
-                    {series.groupItemTitle}
+                  <h4 className="text-white font-semibold text-sm  leading-tight mb-3 line-clamp-2 group-hover:text-white/90 transition-colors">
+                    {series.groupItemTitle || "Yes"}
                   </h4>
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
-                      <span className="text-white/60 text-xs font-['Inter']">Current</span>
-                      <span className="text-white font-medium text-sm font-['Inter']">
+                      <span className="text-white/60 text-xs ">Current</span>
+                      <span className="text-white font-medium text-sm ">
                         {(series.latestPrice * 100).toFixed(1)}%
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-white/60 text-xs font-['Inter']">Volume</span>
-                      <span className="text-white/80 text-xs font-['Inter'] font-medium">
+                      <span className="text-white/60 text-xs ">Volume</span>
+                      <span className="text-white/80 text-xs  font-medium">
                         ${series.volumeNum ? (series.volumeNum > 1000000 ? `${(series.volumeNum/1000000).toFixed(1)}M` : `${(series.volumeNum/1000).toFixed(0)}K`) : 'N/A'}
                       </span>
                     </div>
@@ -417,7 +465,7 @@ function App() {
               <button
                 onClick={() => addToWatchlist(currentEvent)}
                 disabled={isInWatchlist(currentEvent.id)}
-                className={`inline-flex items-center justify-center rounded-xl text-sm font-medium font-['Inter'] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-11 px-8 ${
+                className={`inline-flex items-center justify-center rounded-xl text-sm font-medium  ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-11 px-8 ${
                   isInWatchlist(currentEvent.id)
                     ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 cursor-not-allowed'
                     : 'bg-white text-black hover:bg-white/90 shadow-lg hover:shadow-xl'
@@ -461,84 +509,70 @@ function App() {
   }, [fetchAndGraphMultipleTimeSeries, selectedInterval, intervalConfigs]);
 
   return (
-    <div className="min-h-screen bg-black font-['Inter']">
-      {/* Left Watchlist Ribbon - Collapsible */}
-      <div className={`fixed left-0 top-0 h-full bg-black border-r border-white/10 overflow-y-auto z-50 transition-all duration-300 ${
-        leftSidebarOpen ? 'w-80' : 'w-12'
-      }`}>
+    <div className="min-h-screen bg-black">
+      {/* Left Watchlist Ribbon - Persistent */}
+      <div className="fixed left-0 top-0 h-full w-80 bg-black border-r border-white/10 overflow-y-auto z-50">
         <div className="p-4">
-          {/* Hamburger menu button */}
-          <div className="flex items-center justify-between mb-6">
-            {leftSidebarOpen && (
-              <h2 className="text-white text-lg font-semibold font-['Inter'] tracking-tight">Watchlist</h2>
-            )}
-            <button
-              onClick={() => setLeftSidebarOpen(!leftSidebarOpen)}
-              className="p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-all"
-            >
-              {leftSidebarOpen ? <ChevronLeft className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-            </button>
+          {/* Header */}
+          <div className="mb-6">
+            <h2 className="text-white text-lg font-semibold tracking-tight">Watchlist</h2>
           </div>
           
-          {leftSidebarOpen && (
-            <>
-              {watchlist.length === 0 ? (
-                <div className="text-center text-white/40 mt-12">
-                  <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
-                    <Plus className="w-6 h-6" />
-                  </div>
-                  <p className="text-sm font-medium font-['Inter'] mb-2">Add events to your watchlist</p>
-                  <p className="text-xs font-['Inter'] text-white/30 leading-relaxed px-4">
-                    Track your favorite Polymarket events and stay updated on their performance
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {watchlist.map((event) => (
-                    <div key={event.id} className="group bg-white/5 hover:bg-white/8 rounded-xl p-4 border border-white/10 hover:border-white/20 transition-all duration-200">
-                      <div className="flex items-start justify-between mb-3">
-                        <div className="flex items-center space-x-3 flex-1 min-w-0">
-                          <img 
-                            src={event.image} 
-                            alt={event.title}
-                            className="w-10 h-10 rounded-full flex-shrink-0 object-cover ring-2 ring-white/10"
-                          />
-                          <div className="min-w-0 flex-1">
-                            <h4 className="text-white text-sm font-medium font-['Inter'] line-clamp-2 mb-2 group-hover:text-white/90 transition-colors">
-                              {event.title}
-                            </h4>
-                            <div className="flex items-center space-x-4 text-xs text-white/50">
-                              <div className="flex items-center space-x-1">
-                                <TrendingUp className="w-3 h-3" />
-                                <span className="font-['Inter']">{event.markets?.length || 0} markets</span>
-                              </div>
-                              <div className="flex items-center space-x-1">
-                                <DollarSign className="w-3 h-3" />
-                                <span className="font-['Inter']">
-                                  ${event.volume ? (event.volume > 1000000 ? `${(event.volume/1000000).toFixed(1)}M` : `${(event.volume/1000).toFixed(0)}K`) : 'N/A'}
-                                </span>
-                              </div>
-                            </div>
+          {watchlist.length === 0 ? (
+            <div className="text-center text-white/40 mt-12">
+              <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
+                <Plus className="w-6 h-6" />
+              </div>
+              <p className="text-sm font-medium mb-2">Add events to your watchlist</p>
+              <p className="text-xs text-white/30 leading-relaxed px-4">
+                Track your favorite Polymarket events and stay updated on their performance
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {watchlist.map((event) => (
+                <div key={event.id} className="group bg-white/5 hover:bg-white/8 rounded-xl p-4 border border-white/10 hover:border-white/20 transition-all duration-200">
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center space-x-3 flex-1 min-w-0">
+                      <img 
+                        src={event.image} 
+                        alt={event.title}
+                        className="w-10 h-10 rounded-full flex-shrink-0 object-cover ring-2 ring-white/10"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <h4 className="text-white text-sm font-medium  line-clamp-2 mb-2 group-hover:text-white/90 transition-colors">
+                          {event.title}
+                        </h4>
+                        <div className="flex items-center space-x-4 text-xs text-white/50">
+                          <div className="flex items-center space-x-1">
+                            <TrendingUp className="w-3 h-3" />
+                            <span className="">{event.markets?.length || 0} markets</span>
+                          </div>
+                          <div className="flex items-center space-x-1">
+                            <DollarSign className="w-3 h-3" />
+                            <span className="">
+                              ${event.volume ? (event.volume > 1000000 ? `${(event.volume/1000000).toFixed(1)}M` : `${(event.volume/1000).toFixed(0)}K`) : 'N/A'}
+                            </span>
                           </div>
                         </div>
-                        <button
-                          onClick={() => removeFromWatchlist(event.id)}
-                          className="text-white/30 hover:text-red-400 transition-colors ml-3 flex-shrink-0 p-1 rounded-md hover:bg-red-500/10"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
                       </div>
-                      <button
-                        onClick={() => handleItemClick(event)}
-                        className="w-full text-xs bg-white/10 hover:bg-white/20 text-white/80 hover:text-white py-2 px-3 rounded-lg transition-all font-['Inter'] font-medium border border-white/10 hover:border-white/20"
-                      >
-                        View Details
-                      </button>
                     </div>
-                  ))}
+                    <button
+                      onClick={() => removeFromWatchlist(event.id)}
+                      className="text-white/30 hover:text-red-400 transition-colors ml-3 flex-shrink-0 p-1 rounded-md hover:bg-red-500/10"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => handleItemClick(event)}
+                    className="w-full text-xs bg-white/10 hover:bg-white/20 text-white/80 hover:text-white py-2 px-3 rounded-lg transition-all  font-medium border border-white/10 hover:border-white/20"
+                  >
+                    View Details
+                  </button>
                 </div>
-              )}
-            </>
+              ))}
+            </div>
           )}
         </div>
       </div>
@@ -547,11 +581,11 @@ function App() {
       <div className="fixed right-0 top-0 h-full w-80 bg-black border-l border-white/10 overflow-y-auto z-50">
         <div className="p-4">
           <div className="mb-6">
-            <h2 className="text-white text-lg font-semibold font-['Inter'] tracking-tight mb-4">Sentiment</h2>
+            <h2 className="text-white text-lg font-semibold  tracking-tight mb-4">Sentiment</h2>
             <div className="relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-white/40" />
               <input 
-                className="w-full h-11 pl-10 pr-4 bg-white/5 border border-white/10 rounded-xl text-white placeholder:text-white/40 focus:outline-none focus:border-white/30 focus:bg-white/8 transition-all font-['Inter'] text-sm"
+                className="w-full h-11 pl-10 pr-4 bg-white/5 border border-white/10 rounded-xl text-white placeholder:text-white/40 focus:outline-none focus:border-white/30 focus:bg-white/8 transition-all  text-sm"
                 type="text"
                 placeholder="Search for market sentiment"
               />
@@ -561,22 +595,20 @@ function App() {
             <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
               <TrendingUp className="w-6 h-6" />
             </div>
-            <p className="text-sm font-['Inter'] font-medium">Sentiment analysis coming soon...</p>
+            <p className="text-sm  font-medium">Sentiment analysis coming soon...</p>
           </div>
         </div>
       </div>
 
       {/* Main Content */}
-      <div className={`transition-all duration-300 mr-80 ${
-        leftSidebarOpen ? 'ml-80' : 'ml-12'
-      } p-6`}>
+      <div className="ml-80 mr-80 p-6">
         <div className="max-w-7xl mx-auto">
           {/* Search bar aligned with sidebar search */}
           <div className="mb-6">
             <div className="relative">
               <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-white/40" />
               <input 
-                className="w-full h-12 pl-12 pr-4 bg-white/5 border border-white/10 rounded-xl text-white placeholder:text-white/40 focus:outline-none focus:border-white/30 focus:bg-white/8 transition-all font-['Inter'] backdrop-blur-sm"
+                className="w-full h-12 pl-12 pr-4 bg-white/5 border border-white/10 rounded-xl text-white placeholder:text-white/40 focus:outline-none focus:border-white/30 focus:bg-white/8 transition-all  backdrop-blur-sm"
                 type="text"
                 placeholder="Search for Polymarket events"
                 value={searchTerm}
@@ -599,7 +631,7 @@ function App() {
                       alt={item.title}
                       className="w-12 h-12 rounded-full flex-shrink-0 mr-4 object-cover ring-2 ring-white/10 group-hover:ring-white/20 transition-all"
                     />
-                    <span className="text-white font-medium font-['Inter'] group-hover:text-white/90 transition-colors">{item.title}</span>
+                    <span className="text-white font-medium  group-hover:text-white/90 transition-colors">{item.title}</span>
                   </div>
                 ))}
               </div>
