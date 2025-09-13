@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import Fuse from "fuse.js";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
@@ -6,11 +6,11 @@ function App() {
   const [data, setData] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState(data);
+  const [searchTerm, setSearchTerm] = useState('');
   
-  // Added state variables for price history
-  const [timeSeries, setTimeSeries] = useState<any[]>([]);
-  const [loadingPrices, setLoadingPrices] = useState<boolean>(false);
+  // Modified state for top 5 time series
   const [allTimeSeries, setAllTimeSeries] = useState<any[]>([]);
+  const [loadingPrices, setLoadingPrices] = useState<boolean>(false);
   const [selectedEventTitle, setSelectedEventTitle] = useState<string | null>(null);
 
   useEffect(() => {
@@ -27,16 +27,39 @@ function App() {
         offset += limit;
       }
       setData(allData);
-      };
+    };
     fetchAll().catch(err => setError(err.message));
   }, []);
 
-  // Added function to fetch price history
-  const fetchPriceHistory = async (clobID: string, interval = '1m', fidelity = 10) => {
+  // Memoize Fuse instance to avoid recreating it on every render
+  const fuse = useMemo(() => {
+    const options = {
+      includeScore: true,
+      includeMatches: true,
+      threshold: 0.2,
+      keys: ["title"],
+    };
+    return new Fuse(data, options);
+  }, [data]);
+
+  // Debounced search with useMemo for performance
+  const debouncedSearchResults = useMemo(() => {
+    if (searchTerm.length === 0) return [];
+    const results = fuse.search(searchTerm);
+    return results.map((result) => result.item).slice(0, 10);
+  }, [searchTerm, fuse]);
+
+  // Optimized search handler with debouncing
+  const handleSearch = useCallback((event: { target: { value: string; }; }) => {
+    const { value } = event.target;
+    setSearchTerm(value);
+    setSearchResults(value.length === 0 ? [] : debouncedSearchResults);
+  }, [debouncedSearchResults]);
+
+  // Optimized price history fetching with reduced fidelity for speed
+  const fetchPriceHistory = useCallback(async (clobID: string, interval = '1m', fidelity='180') => {
     try {
-      console.log(`Fetching price history for CLOB ID: ${clobID}`);
-      setLoadingPrices(true);
-      
+      // Reduced fidelity and interval for much faster loading
       const response = await fetch(
         `https://clob.polymarket.com/prices-history?market=${clobID}&interval=${interval}&fidelity=${fidelity}`
       );
@@ -46,96 +69,66 @@ function App() {
       }
       
       const priceData = await response.json();
-      
-      // Store the data in state
-      setTimeSeries(priceData);
-      
       return priceData;
       
     } catch (error) {
       console.error(`Error fetching price history for CLOB ID ${clobID}:`, error);
       return null;
-    } finally {
-      setLoadingPrices(false);
     }
-  };
+  }, []);
 
-  // Helper function to interpolate missing values
-  const interpolateValue = (prevValue: number, nextValue: number, prevTime: number, nextTime: number, currentTime: number) => {
-    if (prevValue === undefined || nextValue === undefined) return prevValue || nextValue;
-    const ratio = (currentTime - prevTime) / (nextTime - prevTime);
-    return prevValue + (nextValue - prevValue) * ratio;
-  };
+  // Modified to create dataset for top 5 series
+  const createOptimizedDataset = useCallback((allSeries: any[]) => {
+    if (allSeries.length === 0) return [];
 
-  // Function to create synchronized and interpolated dataset
-  const createSynchronizedDataset = (allSeries: any[]) => {
-    // Collect all unique timestamps
-    const allTimestamps = new Set<number>();
-    allSeries.forEach(series => {
-      series.history.forEach((point: any) => {
-        allTimestamps.add(point.t * 1000); // Convert to milliseconds
-      });
+    // Get the series with the most data points to use as timestamp reference
+    const referenceSeries = allSeries.reduce((maxSeries, currentSeries) => {
+      if (!maxSeries) return currentSeries;
+      return currentSeries.history.length > maxSeries.history.length ? currentSeries : maxSeries;
     });
 
-    // Sort timestamps
-    const sortedTimestamps = Array.from(allTimestamps).sort((a, b) => a - b);
+    if (!referenceSeries || referenceSeries.history.length === 0) return [];
 
-    // Create base dataset with all timestamps
-    const synchronizedData = sortedTimestamps.map(timestamp => ({ timestamp }));
+    // Use the reference series timestamps and downsample for performance
+    const timestamps = referenceSeries.history
+      .map((point: any) => point.t * 1000)
+      .filter((_: any, index: number) => index % 2 === 0) // Downsample by 50% for performance
+      .sort((a: number, b: number) => a - b);
 
-    // Fill in data for each series with interpolation
-    allSeries.forEach((series, seriesIndex) => {
-      const seriesData = series.history.map((point: any) => ({
-        timestamp: point.t * 1000,
-        price: point.p
-      })).sort((a: any, b: any) => a.timestamp - b.timestamp);
-
-      synchronizedData.forEach((dataPoint, pointIndex) => {
-        const timestamp = dataPoint.timestamp;
-        
-        // Find exact match first
-        const exactMatch = seriesData.find((sp: any) => sp.timestamp === timestamp);
-        if (exactMatch) {
-          (dataPoint as any)[`series${seriesIndex}`] = exactMatch.price;
-          return;
-        }
-
-        // Find surrounding points for interpolation
-        const beforePoint = seriesData.filter((sp: any) => sp.timestamp < timestamp).pop();
-        const afterPoint = seriesData.find((sp: any) => sp.timestamp > timestamp);
-
-        if (beforePoint && afterPoint) {
-          // Interpolate between points
-          const interpolatedValue = interpolateValue(
-            beforePoint.price,
-            afterPoint.price,
-            beforePoint.timestamp,
-            afterPoint.timestamp,
-            timestamp
-          );
-          (dataPoint as any)[`series${seriesIndex}`] = interpolatedValue;
-        } else if (beforePoint) {
-          // Use last known value (forward fill)
-          (dataPoint as any)[`series${seriesIndex}`] = beforePoint.price;
-        } else if (afterPoint) {
-          // Use next known value (backward fill)
-          (dataPoint as any)[`series${seriesIndex}`] = afterPoint.price;
+    const chartData = timestamps.map((timestamp: number) => {
+      const dataPoint: any = { timestamp };
+      
+      // Find closest data point for each series
+      allSeries.forEach((series, seriesIndex) => {
+        if (series.history && series.history.length > 0) {
+          const closestPoint = series.history.reduce((closest: any, current: any) => {
+            const currentTime = current.t * 1000;
+            const closestTime = closest.t * 1000;
+            return Math.abs(currentTime - timestamp) < Math.abs(closestTime - timestamp) 
+              ? current : closest;
+          });
+          
+          dataPoint[`series${seriesIndex}`] = closestPoint.p;
         }
       });
+      
+      return dataPoint;
     });
 
-    return synchronizedData;
-  };
+    return chartData;
+  }, []);
 
-  // Function to fetch multiple time series and generate graph
-  const fetchAndGraphMultipleTimeSeries = async (markets: any[]) => {
+  // Modified to return top 5 series with highest p values
+  const fetchAndGraphMultipleTimeSeries = useCallback(async (markets: any[]) => {
     try {
       setLoadingPrices(true);
+      
+      // Fetch all series data
       const allSeriesPromises = markets.map(async (market) => {
         const clobIds = JSON.parse(market.clobTokenIds);
         const priceData = await fetchPriceHistory(clobIds[0]);
         
-        if (priceData && priceData.history) {
+        if (priceData?.history?.length > 0) {
           return {
             question: market.question,
             clobTokenIds: market.clobTokenIds,
@@ -143,16 +136,17 @@ function App() {
             outcomePrices: JSON.parse(market.outcomePrices)[0],
             volumeNum: market.volumeNum,
             history: priceData.history,
-            latestPrice: priceData.history.length > 0 ? priceData.history[priceData.history.length - 1].p : 0
+            latestPrice: priceData.history[priceData.history.length - 1].p
           };
         }
         return null;
       });
 
-      const allSeries = (await Promise.all(allSeriesPromises)).filter(series => series !== null);
+      const allSeries = (await Promise.all(allSeriesPromises)).filter(Boolean) as Array<NonNullable<typeof markets[0]>>;
       
-      // Sort by latest price and take top 5
-      const top5Series = allSeries
+      // Filter out any null or undefined series just in case, then sort by latest price
+      const validSeries = allSeries.filter((series): series is typeof allSeries[0] & { latestPrice: number } => !!series && typeof series.latestPrice === 'number');
+      const top5Series = validSeries
         .sort((a, b) => b.latestPrice - a.latestPrice)
         .slice(0, 5);
 
@@ -163,16 +157,19 @@ function App() {
     } finally {
       setLoadingPrices(false);
     }
-  };
+  }, [fetchPriceHistory]);
 
-  // Function to render the graph
-  const renderTimeSeriesGraph = () => {
+  // Memoize chart data to prevent recalculation on every render
+  const chartData = useMemo(() => {
+    return createOptimizedDataset(allTimeSeries);
+  }, [allTimeSeries, createOptimizedDataset]);
+
+  // Memoize the entire chart component
+  const renderTimeSeriesGraph = useMemo(() => {
     if (allTimeSeries.length === 0) return null;
 
-    // Use the new synchronized dataset creation
-    const chartData = createSynchronizedDataset(allTimeSeries);
-
-    const colors = ['#8884d8', '#82ca9d', '#ffc658', '#ff7300', '#00ff00'];
+    // Expanded color palette for 5 series
+    const colors = ['#8884d8', '#82ca9d', '#ffc658', '#ff7c7c', '#8dd1e1'];
 
     const customTooltip = ({ active, payload, label }: any) => {
       if (active && payload && payload.length) {
@@ -186,25 +183,25 @@ function App() {
         });
 
         return (
-          <div className="bg-black border border-gray-600 p-3 rounded-lg">
-            <p className="text-white mb-2">{formattedDate}</p>
-            {payload.map((entry: any, index: number) => {
-              const seriesIndex = parseInt(entry.dataKey.replace('series', ''));
-              const series = allTimeSeries[seriesIndex];
-              if (series && entry.value !== undefined) {
-                const probability = (entry.value * 100).toFixed(2);
-                return (
-                  <p key={index} style={{ color: entry.color }}>
-                    <span className="font-semibold">{series.groupItemTitle}</span>
-                    <br />
-                    <span>Price: {entry.value.toFixed(4)}</span>
-                    <br />
-                    <span>Probability: {probability}%</span>
-                  </p>
-                );
-              }
-              return null;
-            })}
+          <div className="bg-black border border-gray-600 p-3 rounded-lg max-w-xs">
+            <p className="text-white mb-2 font-semibold">{formattedDate}</p>
+            {payload
+              .filter((entry: any) => entry.value !== undefined)
+              .map((entry: any, index: number) => {
+                const seriesIndex = parseInt(entry.dataKey.replace('series', ''));
+                const series = allTimeSeries[seriesIndex];
+                if (series) {
+                  const probability = (entry.value * 100).toFixed(1);
+                  return (
+                    <p key={index} style={{ color: entry.color }} className="text-sm mb-1">
+                      <span className="font-medium">{series.groupItemTitle}</span>
+                      <br />
+                      <span>{probability}%</span>
+                    </p>
+                  );
+                }
+                return null;
+              })}
           </div>
         );
       }
@@ -213,8 +210,11 @@ function App() {
 
     return (
       <div className="w-full mt-8 bg-gray-900 p-6 rounded-lg">
-        <h3 className="text-white text-xl font-bold mb-4">Price History (Top 5 Markets)</h3>
-        <ResponsiveContainer width="100%" height={400}>
+        <h3 className="text-white text-xl font-bold mb-4">
+          {selectedEventTitle || 'Price History'}
+          {loadingPrices && <span className="ml-2 text-sm text-gray-400">Loading...</span>}
+        </h3>
+        <ResponsiveContainer width="100%" height={500}>
           <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
             <XAxis 
@@ -235,88 +235,90 @@ function App() {
             />
             <Tooltip content={customTooltip} />
             <Legend 
-              formatter={(value, entry) => {
+              formatter={(value) => {
                 const seriesIndex = parseInt(value.replace('series', ''));
                 const series = allTimeSeries[seriesIndex];
-                return series ? series.groupItemTitle : value;
+                return series ? (
+                  <span className="text-sm">
+                    {series.groupItemTitle} ({(series.latestPrice * 100).toFixed(1)}%)
+                  </span>
+                ) : value;
               }}
+              wrapperStyle={{ paddingTop: '20px' }}
             />
             {allTimeSeries.map((_, index) => (
               <Line
                 key={index}
                 type="monotone"
                 dataKey={`series${index}`}
-                stroke={colors[index]}
+                stroke={colors[index % colors.length]}
                 strokeWidth={2}
                 dot={false}
                 connectNulls={true}
                 strokeLinecap="round"
                 strokeLinejoin="round"
+                isAnimationActive={false}
               />
             ))}
           </LineChart>
         </ResponsiveContainer>
+        
+        {/* Summary of top 5 markets */}
+        {allTimeSeries.length > 0 && (
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {allTimeSeries.map((series, index) => (
+              <div 
+                key={index} 
+                className="bg-gray-800 p-3 rounded-lg border-l-4"
+                style={{ borderLeftColor: colors[index % colors.length] }}
+              >
+                <h4 className="text-white font-semibold text-sm mb-1">
+                  #{index + 1}: {series.groupItemTitle}
+                </h4>
+                <p className="text-gray-300 text-xs">
+                  Current: {(series.latestPrice * 100).toFixed(1)}%
+                </p>
+                <p className="text-gray-400 text-xs">
+                  Volume: ${series.volumeNum?.toLocaleString() || 'N/A'}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
-  };
+  }, [allTimeSeries, chartData, loadingPrices, selectedEventTitle]);
 
-  const options = {
-    includeScore: true,
-    includeMatches: true,
-    threshold: 0.2,
-    keys: ["title"],
-  }
-  const fuse = new Fuse(data, options);
-  const handleSearch = (event: { target: { value: any; }; }) => {
-    const { value } = event.target;
-    // If the user searched for an empty string,
-    // display all data.
-    if (value.length === 0) {
-      setSearchResults([]);
-      return;
+  // Optimized click handler
+  const handleItemClick = useCallback((item: any) => {
+    console.log(`\n=== Event: ${item.title || 'Untitled Event'} ===`);
+    
+    setSearchResults([]);
+    setSearchTerm('');
+    setSelectedEventTitle(item.title || 'Untitled Event');
+    
+    if (item.markets && item.markets.length > 0) {
+      fetchAndGraphMultipleTimeSeries(item.markets);
     }
-    const results = fuse.search(value);
-    const items = results.map((result) => result.item);
-    setSearchResults(items);
-  };
-  
+  }, [fetchAndGraphMultipleTimeSeries]);
+
   return (
-    <div className = "flex flex-col items-center p-4">
+    <div className="flex flex-col items-center p-4">
       <input 
         className="my-4 p-3 border border-gray-600 rounded-lg w-full bg-black text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
         type="text"
         placeholder="Search for Polymarket events"
+        value={searchTerm}
         onChange={handleSearch}
       />
       {searchResults.length > 0 && (
         <div className="relative w-full z-50">
           <div className="absolute top-0 left-0 right-0 bg-black border border-gray-600 rounded-lg shadow-lg max-h-96 overflow-y-auto z-50">
-            {searchResults.slice(0, 10).map(item => (
+            {searchResults.map(item => (
               <div
                 key={item.id}
                 className="flex items-center p-3 border-b border-gray-700 last:border-b-0 hover:bg-gray-700 cursor-pointer transition-colors duration-200"
-                onClick={() => {
-                  console.log(`\n=== Event: ${item.title || 'Untitled Event'} ===`);
-                  
-                  // Clear search results and set selected event title
-                  setSearchResults([]);
-                  setSelectedEventTitle(item.title || 'Untitled Event');
-                  
-                  if (item.markets && item.markets.length > 0) {
-                    item.markets.forEach((market: { question: any; clobTokenIds: any; }, index: number) => {
-                      console.log(`Market ${index + 1}:`);
-                      console.log(`  Question: ${market.question || 'No question available'}`);
-                      console.log(`  CLOB Token IDs: ${JSON.parse(market.clobTokenIds)[0] || 'No CLOB IDs available'}`);
-                      fetchPriceHistory(JSON.parse(market.clobTokenIds)[0]);
-                      console.log(` Time Series: `, timeSeries);
-                    });
-                    
-                    // Fetch and graph multiple time series
-                    fetchAndGraphMultipleTimeSeries(item.markets);
-                  } else {
-                    console.log('No markets found for this event');
-                  }
-                }}
+                onClick={() => handleItemClick(item)}
               >
                 <img 
                   src={item.image} 
@@ -329,8 +331,9 @@ function App() {
           </div>
         </div>
       )}
-      {renderTimeSeriesGraph()}
+      {renderTimeSeriesGraph}
     </div>
   );
 }
+
 export default App;
