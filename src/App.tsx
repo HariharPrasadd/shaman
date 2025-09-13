@@ -5,15 +5,24 @@ function App() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-  fetch('/api/events?closed=false&limit=1000')
-    .then(response => response.json())
-    .then(data => {
-      setData(data); // always an array
-    })
-    .catch(err => {
-      setError(err.message); // keep errors in separate state
-    });
+    const fetchAll = async () => {
+      const limit = 500;
+      let offset = 0;
+      let allData: React.SetStateAction<any[]> = [];
+      while (true) {
+        const response = await fetch(`/api/events?closed=false&limit=${limit}&offset=${offset}`);
+        const batch = await response.json();
+        if (!batch || batch.length === 0) break;
+        allData = allData.concat(batch);
+        if (batch.length < limit) break;
+        offset += limit;
+      }
+      setData(allData);
+      };
+
+    fetchAll().catch(err => setError(err.message));
   }, []);
+
 
   return (
     <div>
