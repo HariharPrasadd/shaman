@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import Fuse from "fuse.js";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { X, Plus, TrendingUp, DollarSign } from 'lucide-react';
+import { X, Plus, TrendingUp, DollarSign, Menu, ChevronLeft, Search } from 'lucide-react';
 
 function App() {
   const [data, setData] = useState<any[]>([]);
@@ -21,6 +21,9 @@ function App() {
 
   // Watchlist state
   const [watchlist, setWatchlist] = useState<any[]>([]);
+  
+  // Sidebar state - only left sidebar is collapsible
+  const [leftSidebarOpen, setLeftSidebarOpen] = useState(true);
 
   // Interval configurations
   const intervalConfigs = {
@@ -210,8 +213,8 @@ function App() {
   const renderTimeSeriesGraph = useMemo(() => {
     if (allTimeSeries.length === 0) return null;
 
-    // Expanded color palette for 5 series
-    const colors = ['#8884d8', '#82ca9d', '#ffc658', '#ff7c7c', '#8dd1e1'];
+    // Fey-inspired color palette - more subtle and professional
+    const colors = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 
     const customTooltip = ({ active, payload, label }: any) => {
       if (active && payload && payload.length) {
@@ -225,8 +228,8 @@ function App() {
         });
 
         return (
-          <div className="bg-black border border-gray-600 p-2 rounded-lg max-w-xs text-xs">
-            <p className="text-white mb-2 font-semibold text-sm">{formattedDate}</p>
+          <div className="bg-black/95 backdrop-blur-sm border border-white/10 p-3 rounded-xl shadow-2xl">
+            <p className="text-white font-medium text-sm mb-2">{formattedDate}</p>
             {payload
               .filter((entry: any) => entry.value !== undefined)
               .map((entry: any, index: number) => {
@@ -235,10 +238,20 @@ function App() {
                 if (series) {
                   const probability = (entry.value * 100).toFixed(1);
                   return (
-                    <p key={index} style={{ color: entry.color }} className="text-xs mb-1 leading-tight">
-                      <span className="font-medium block truncate">{series.groupItemTitle}</span>
-                      <span className="text-xs opacity-90">{probability}%</span>
-                    </p>
+                    <div key={index} className="flex items-center justify-between py-1">
+                      <div className="flex items-center space-x-2">
+                        <div 
+                          className="w-2 h-2 rounded-full" 
+                          style={{ backgroundColor: entry.color }}
+                        />
+                        <span className="text-white/90 text-xs truncate max-w-[120px]">
+                          {series.groupItemTitle}
+                        </span>
+                      </div>
+                      <span className="text-white font-medium text-xs ml-2">
+                        {probability}%
+                      </span>
+                    </div>
                   );
                 }
                 return null;
@@ -250,123 +263,183 @@ function App() {
     };
 
     return (
-      <div className="w-full mt-8 bg-gray-900 p-6 rounded-lg">
-        <div className="flex justify-between items-center mb-4">
-          <h3 className="text-white text-xl font-bold">
-            {selectedEventTitle || 'Price History'}
-            {loadingPrices && <span className="ml-2 text-sm text-gray-400">Loading...</span>}
-          </h3>
+      <div className="w-full mt-8">
+        <div className="bg-gradient-to-br from-slate-900/50 to-slate-800/30 border border-white/5 rounded-2xl p-6 backdrop-blur-sm">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between mb-6 space-y-4 lg:space-y-0">
+            <div>
+              <h3 className="text-white text-2xl font-semibold font-['Inter'] tracking-tight">
+                {selectedEventTitle || 'Price History'}
+              </h3>
+              {loadingPrices && (
+                <div className="flex items-center mt-2">
+                  <div className="animate-spin w-4 h-4 border-2 border-white/20 border-t-white rounded-full mr-2" />
+                  <span className="text-white/60 text-sm font-['Inter']">Loading market data...</span>
+                </div>
+              )}
+            </div>
+            
+            {/* Interval buttons with shadcn styling */}
+            <div className="inline-flex h-9 items-center justify-center rounded-lg bg-white/5 p-1 text-white/60 backdrop-blur-sm border border-white/10">
+              {['1h', '6h', '1d', '1w', '1m'].map((interval) => (
+                <button
+                  key={interval}
+                  onClick={() => handleIntervalChange(interval)}
+                  className={`inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium font-['Inter'] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 ${
+                    selectedInterval === interval
+                      ? 'bg-white text-black shadow-sm'
+                      : 'text-white/70 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  {interval}
+                </button>
+              ))}
+            </div>
+          </div>
           
-          {/* Interval buttons */}
-          <div className="flex gap-2">
-            {['1h', '6h', '1d', '1w', '1m'].map((interval) => (
+          <div className="h-[500px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+                <defs>
+                  <linearGradient id="gridGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="rgba(255,255,255,0.1)" />
+                    <stop offset="100%" stopColor="rgba(255,255,255,0.02)" />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid 
+                  strokeDasharray="1 3" 
+                  stroke="rgba(255,255,255,0.06)" 
+                  strokeWidth={0.5}
+                />
+                <XAxis 
+                  dataKey="timestamp" 
+                  stroke="rgba(255,255,255,0.4)"
+                  fontSize={11}
+                  fontFamily="Inter"
+                  type="number"
+                  scale="time"
+                  domain={['dataMin', 'dataMax']}
+                  axisLine={false}
+                  tickLine={false}
+                  tickFormatter={(timestamp) => {
+                    const date = new Date(timestamp);
+                    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                  }}
+                />
+                <YAxis 
+                  stroke="rgba(255,255,255,0.4)"
+                  fontSize={11}
+                  fontFamily="Inter"
+                  domain={[0, 1]}
+                  axisLine={false}
+                  tickLine={false}
+                  tickFormatter={(value) => `${(value * 100).toFixed(0)}%`}
+                />
+                <Tooltip content={customTooltip} />
+                <Legend 
+                  formatter={(value) => {
+                    const seriesIndex = parseInt(value.replace('series', ''));
+                    const series = allTimeSeries[seriesIndex];
+                    return series ? (
+                      <span className="text-sm font-['Inter'] text-white/80">
+                        {series.groupItemTitle} ({(series.latestPrice * 100).toFixed(1)}%)
+                      </span>
+                    ) : value;
+                  }}
+                  wrapperStyle={{ 
+                    paddingTop: '24px',
+                    fontSize: '12px'
+                  }}
+                />
+                {allTimeSeries.map((_, index) => (
+                  <Line
+                    key={index}
+                    type="monotone"
+                    dataKey={`series${index}`}
+                    stroke={colors[index % colors.length]}
+                    strokeWidth={2.5}
+                    dot={false}
+                    connectNulls={true}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    isAnimationActive={false}
+                    filter="drop-shadow(0 0 6px rgba(99, 102, 241, 0.3))"
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          
+          {/* Market summary cards with Fey-inspired design */}
+          {allTimeSeries.length > 0 && (
+            <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+              {allTimeSeries.map((series, index) => (
+                <div 
+                  key={index} 
+                  className="group relative bg-white/5 hover:bg-white/8 border border-white/10 hover:border-white/20 rounded-xl p-4 transition-all duration-200 backdrop-blur-sm"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div 
+                      className="w-3 h-3 rounded-full shadow-lg"
+                      style={{ 
+                        backgroundColor: colors[index % colors.length],
+                        boxShadow: `0 0 12px ${colors[index % colors.length]}40`
+                      }}
+                    />
+                    <span className="text-white/50 text-xs font-['Inter'] font-medium">
+                      #{index + 1}
+                    </span>
+                  </div>
+                  <h4 className="text-white font-semibold text-sm font-['Inter'] leading-tight mb-3 line-clamp-2 group-hover:text-white/90 transition-colors">
+                    {series.groupItemTitle}
+                  </h4>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-white/60 text-xs font-['Inter']">Current</span>
+                      <span className="text-white font-medium text-sm font-['Inter']">
+                        {(series.latestPrice * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-white/60 text-xs font-['Inter']">Volume</span>
+                      <span className="text-white/80 text-xs font-['Inter'] font-medium">
+                        ${series.volumeNum ? (series.volumeNum > 1000000 ? `${(series.volumeNum/1000000).toFixed(1)}M` : `${(series.volumeNum/1000).toFixed(0)}K`) : 'N/A'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add to Watchlist Button with shadcn styling */}
+          {currentEvent && (
+            <div className="mt-8 flex justify-center">
               <button
-                key={interval}
-                onClick={() => handleIntervalChange(interval)}
-                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-                  selectedInterval === interval
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                onClick={() => addToWatchlist(currentEvent)}
+                disabled={isInWatchlist(currentEvent.id)}
+                className={`inline-flex items-center justify-center rounded-xl text-sm font-medium font-['Inter'] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-11 px-8 ${
+                  isInWatchlist(currentEvent.id)
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 cursor-not-allowed'
+                    : 'bg-white text-black hover:bg-white/90 shadow-lg hover:shadow-xl'
                 }`}
               >
-                {interval}
+                {isInWatchlist(currentEvent.id) ? (
+                  <>
+                    <svg className="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                    </svg>
+                    Added to Watchlist
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-4 h-4 mr-2" />
+                    Add to Watchlist
+                  </>
+                )}
               </button>
-            ))}
-          </div>
+            </div>
+          )}
         </div>
-        
-        <ResponsiveContainer width="100%" height={500}>
-          <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-            <XAxis 
-              dataKey="timestamp" 
-              stroke="#9CA3AF"
-              type="number"
-              scale="time"
-              domain={['dataMin', 'dataMax']}
-              tickFormatter={(timestamp) => {
-                const date = new Date(timestamp);
-                return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-              }}
-            />
-            <YAxis 
-              stroke="#9CA3AF"
-              domain={[0, 1]}
-              tickFormatter={(value) => `${(value * 100).toFixed(0)}%`}
-            />
-            <Tooltip content={customTooltip} />
-            <Legend 
-              formatter={(value) => {
-                const seriesIndex = parseInt(value.replace('series', ''));
-                const series = allTimeSeries[seriesIndex];
-                return series ? (
-                  <span className="text-sm">
-                    {series.groupItemTitle} ({(series.latestPrice * 100).toFixed(1)}%)
-                  </span>
-                ) : value;
-              }}
-              wrapperStyle={{ paddingTop: '20px' }}
-            />
-            {allTimeSeries.map((_, index) => (
-              <Line
-                key={index}
-                type="monotone"
-                dataKey={`series${index}`}
-                stroke={colors[index % colors.length]}
-                strokeWidth={2}
-                dot={false}
-                connectNulls={true}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                isAnimationActive={false}
-              />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-        
-        {/* Responsive summary of top 5 markets */}
-        {allTimeSeries.length > 0 && (
-          <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-            {allTimeSeries.map((series, index) => (
-              <div 
-                key={index} 
-                className="bg-gray-800 p-2 rounded-lg border-l-4 text-xs"
-                style={{ borderLeftColor: colors[index % colors.length] }}
-              >
-                <h4 className="text-white font-semibold text-xs mb-1 line-clamp-2">
-                  #{index + 1}: {series.groupItemTitle}
-                </h4>
-                <p className="text-gray-300 text-xs">
-                  Current: {(series.latestPrice * 100).toFixed(1)}%
-                </p>
-                <p className="text-gray-400 text-xs">
-                  Vol: ${series.volumeNum ? (series.volumeNum > 1000 ? `${(series.volumeNum/1000).toFixed(0)}K` : series.volumeNum.toLocaleString()) : 'N/A'}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Add to Watchlist Button */}
-        {currentEvent && (
-          <div className="mt-6 text-center">
-            <button
-              onClick={() => addToWatchlist(currentEvent)}
-              disabled={isInWatchlist(currentEvent.id)}
-              className={`px-6 py-2 rounded-lg font-medium transition-all ${
-                isInWatchlist(currentEvent.id)
-                  ? 'bg-green-600 text-white cursor-not-allowed'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white'
-              }`}
-            >
-              {isInWatchlist(currentEvent.id) ? (
-                <>✓ Added to Watchlist</>
-              ) : (
-                <>+ Add to Watchlist</>
-              )}
-            </button>
-          </div>
-        )}
       </div>
     );
   }, [allTimeSeries, chartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, currentEvent, addToWatchlist, isInWatchlist]);
@@ -388,111 +461,153 @@ function App() {
   }, [fetchAndGraphMultipleTimeSeries, selectedInterval, intervalConfigs]);
 
   return (
-    <div className="flex min-h-screen bg-black">
-      {/* Left Watchlist Ribbon */}
-      <div className="fixed left-0 top-0 h-full w-64 bg-gray-900 border-r border-gray-700 overflow-y-auto z-40">
+    <div className="min-h-screen bg-black font-['Inter']">
+      {/* Left Watchlist Ribbon - Collapsible */}
+      <div className={`fixed left-0 top-0 h-full bg-black border-r border-white/10 overflow-y-auto z-50 transition-all duration-300 ${
+        leftSidebarOpen ? 'w-80' : 'w-12'
+      }`}>
         <div className="p-4">
-          <h2 className="text-white text-lg font-bold mb-4">Watchlist</h2>
+          {/* Hamburger menu button */}
+          <div className="flex items-center justify-between mb-6">
+            {leftSidebarOpen && (
+              <h2 className="text-white text-lg font-semibold font-['Inter'] tracking-tight">Watchlist</h2>
+            )}
+            <button
+              onClick={() => setLeftSidebarOpen(!leftSidebarOpen)}
+              className="p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-all"
+            >
+              {leftSidebarOpen ? <ChevronLeft className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+          </div>
           
-          {watchlist.length === 0 ? (
-            <div className="text-center text-gray-400 mt-8">
-              <Plus className="mx-auto mb-2 w-8 h-8 opacity-50" />
-              <p className="text-sm font-medium">Add events to your watchlist</p>
-              <p className="text-xs mt-1">Track your favorite Polymarket events and stay updated on their performance</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {watchlist.map((event) => (
-                <div key={event.id} className="bg-gray-800 rounded-lg p-3 border border-gray-700">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-center space-x-3 flex-1 min-w-0">
-                      <img 
-                        src={event.image} 
-                        alt={event.title}
-                        className="w-8 h-8 rounded-full flex-shrink-0 object-cover"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <h4 className="text-white text-sm font-medium line-clamp-2 mb-1">
-                          {event.title}
-                        </h4>
-                        <div className="flex items-center space-x-2 text-xs text-gray-400">
-                          <div className="flex items-center space-x-1">
-                            <TrendingUp className="w-3 h-3" />
-                            <span>{event.markets?.length || 0} markets</span>
-                          </div>
-                          <div className="flex items-center space-x-1">
-                            <DollarSign className="w-3 h-3" />
-                            <span>${event.volume ? (event.volume > 1000000 ? `${(event.volume/1000000).toFixed(1)}M` : `${(event.volume/1000).toFixed(0)}K`) : 'N/A'}</span>
+          {leftSidebarOpen && (
+            <>
+              {watchlist.length === 0 ? (
+                <div className="text-center text-white/40 mt-12">
+                  <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
+                    <Plus className="w-6 h-6" />
+                  </div>
+                  <p className="text-sm font-medium font-['Inter'] mb-2">Add events to your watchlist</p>
+                  <p className="text-xs font-['Inter'] text-white/30 leading-relaxed px-4">
+                    Track your favorite Polymarket events and stay updated on their performance
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {watchlist.map((event) => (
+                    <div key={event.id} className="group bg-white/5 hover:bg-white/8 rounded-xl p-4 border border-white/10 hover:border-white/20 transition-all duration-200">
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex items-center space-x-3 flex-1 min-w-0">
+                          <img 
+                            src={event.image} 
+                            alt={event.title}
+                            className="w-10 h-10 rounded-full flex-shrink-0 object-cover ring-2 ring-white/10"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <h4 className="text-white text-sm font-medium font-['Inter'] line-clamp-2 mb-2 group-hover:text-white/90 transition-colors">
+                              {event.title}
+                            </h4>
+                            <div className="flex items-center space-x-4 text-xs text-white/50">
+                              <div className="flex items-center space-x-1">
+                                <TrendingUp className="w-3 h-3" />
+                                <span className="font-['Inter']">{event.markets?.length || 0} markets</span>
+                              </div>
+                              <div className="flex items-center space-x-1">
+                                <DollarSign className="w-3 h-3" />
+                                <span className="font-['Inter']">
+                                  ${event.volume ? (event.volume > 1000000 ? `${(event.volume/1000000).toFixed(1)}M` : `${(event.volume/1000).toFixed(0)}K`) : 'N/A'}
+                                </span>
+                              </div>
+                            </div>
                           </div>
                         </div>
+                        <button
+                          onClick={() => removeFromWatchlist(event.id)}
+                          className="text-white/30 hover:text-red-400 transition-colors ml-3 flex-shrink-0 p-1 rounded-md hover:bg-red-500/10"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
                       </div>
+                      <button
+                        onClick={() => handleItemClick(event)}
+                        className="w-full text-xs bg-white/10 hover:bg-white/20 text-white/80 hover:text-white py-2 px-3 rounded-lg transition-all font-['Inter'] font-medium border border-white/10 hover:border-white/20"
+                      >
+                        View Details
+                      </button>
                     </div>
-                    <button
-                      onClick={() => removeFromWatchlist(event.id)}
-                      className="text-gray-400 hover:text-red-400 transition-colors ml-2 flex-shrink-0"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-                  <button
-                    onClick={() => handleItemClick(event)}
-                    className="w-full mt-2 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 py-1 px-2 rounded transition-colors"
-                  >
-                    View Details
-                  </button>
+                  ))}
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
         </div>
       </div>
 
-      {/* Right Sentiment Ribbon */}
-      <div className="fixed right-0 top-0 h-full w-64 bg-gray-900 border-l border-gray-700 overflow-y-auto z-40">
+      {/* Right Sentiment Ribbon - Always Open */}
+      <div className="fixed right-0 top-0 h-full w-80 bg-black border-l border-white/10 overflow-y-auto z-50">
         <div className="p-4">
-          <div className="mb-4">
-            <input 
-              className="w-full p-2 border border-gray-600 rounded-lg bg-black text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 text-sm"
-              type="text"
-              placeholder="Search for market sentiment"
-            />
+          <div className="mb-6">
+            <h2 className="text-white text-lg font-semibold font-['Inter'] tracking-tight mb-4">Sentiment</h2>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-white/40" />
+              <input 
+                className="w-full h-11 pl-10 pr-4 bg-white/5 border border-white/10 rounded-xl text-white placeholder:text-white/40 focus:outline-none focus:border-white/30 focus:bg-white/8 transition-all font-['Inter'] text-sm"
+                type="text"
+                placeholder="Search for market sentiment"
+              />
+            </div>
           </div>
-          <div className="text-center text-gray-400 mt-8">
-            <p className="text-sm">Sentiment analysis coming soon...</p>
+          <div className="text-center text-white/40 mt-12">
+            <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
+              <TrendingUp className="w-6 h-6" />
+            </div>
+            <p className="text-sm font-['Inter'] font-medium">Sentiment analysis coming soon...</p>
           </div>
         </div>
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 ml-64 mr-64 p-4">
-        <input 
-          className="my-4 p-3 border border-gray-600 rounded-lg w-full bg-black text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
-          type="text"
-          placeholder="Search for Polymarket events"
-          value={searchTerm}
-          onChange={handleSearch}
-        />
-        {searchResults.length > 0 && (
-          <div className="relative w-full z-50">
-            <div className="absolute top-0 left-0 right-0 bg-black border border-gray-600 rounded-lg shadow-lg max-h-96 overflow-y-auto z-50">
-              {searchResults.map(item => (
-                <div
-                  key={item.id}
-                  className="flex items-center p-3 border-b border-gray-700 last:border-b-0 hover:bg-gray-700 cursor-pointer transition-colors duration-200"
-                  onClick={() => handleItemClick(item)}
-                >
-                  <img 
-                    src={item.image} 
-                    alt={item.title}
-                    className="w-10 h-10 rounded-full flex-shrink-0 mr-3 object-cover"
-                  />
-                  <span className="text-white font-medium">{item.title}</span>
-                </div>
-              ))}
+      <div className={`transition-all duration-300 mr-80 ${
+        leftSidebarOpen ? 'ml-80' : 'ml-12'
+      } p-6`}>
+        <div className="max-w-7xl mx-auto">
+          {/* Search bar aligned with sidebar search */}
+          <div className="mb-6">
+            <div className="relative">
+              <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-white/40" />
+              <input 
+                className="w-full h-12 pl-12 pr-4 bg-white/5 border border-white/10 rounded-xl text-white placeholder:text-white/40 focus:outline-none focus:border-white/30 focus:bg-white/8 transition-all font-['Inter'] backdrop-blur-sm"
+                type="text"
+                placeholder="Search for Polymarket events"
+                value={searchTerm}
+                onChange={handleSearch}
+              />
             </div>
           </div>
-        )}
-        {renderTimeSeriesGraph}
+
+          {searchResults.length > 0 && (
+            <div className="relative w-full z-40 mb-6">
+              <div className="absolute top-0 left-0 right-0 bg-black/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl max-h-96 overflow-y-auto">
+                {searchResults.map(item => (
+                  <div
+                    key={item.id}
+                    className="flex items-center p-4 border-b border-white/10 last:border-b-0 hover:bg-white/5 cursor-pointer transition-all duration-200 group"
+                    onClick={() => handleItemClick(item)}
+                  >
+                    <img 
+                      src={item.image} 
+                      alt={item.title}
+                      className="w-12 h-12 rounded-full flex-shrink-0 mr-4 object-cover ring-2 ring-white/10 group-hover:ring-white/20 transition-all"
+                    />
+                    <span className="text-white font-medium font-['Inter'] group-hover:text-white/90 transition-colors">{item.title}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          
+          {renderTimeSeriesGraph}
+        </div>
       </div>
     </div>
   );
