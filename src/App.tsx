@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import Fuse from "fuse.js";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { X, Plus, TrendingUp, DollarSign } from 'lucide-react';
 
 function App() {
   const [data, setData] = useState<any[]>([]);
@@ -12,10 +13,14 @@ function App() {
   const [allTimeSeries, setAllTimeSeries] = useState<any[]>([]);
   const [loadingPrices, setLoadingPrices] = useState<boolean>(false);
   const [selectedEventTitle, setSelectedEventTitle] = useState<string | null>(null);
+  const [currentEvent, setCurrentEvent] = useState<any>(null);
   
   // New state for interval selection
   const [selectedInterval, setSelectedInterval] = useState('1m');
   const [currentMarkets, setCurrentMarkets] = useState<any[]>([]);
+
+  // Watchlist state
+  const [watchlist, setWatchlist] = useState<any[]>([]);
 
   // Interval configurations
   const intervalConfigs = {
@@ -181,12 +186,27 @@ function App() {
     }
   }, [currentMarkets, fetchAndGraphMultipleTimeSeries, intervalConfigs]);
 
+  // Watchlist functions
+  const addToWatchlist = useCallback((event: any) => {
+    if (!watchlist.some(item => item.id === event.id)) {
+      setWatchlist(prev => [event, ...prev]); // Add to beginning
+    }
+  }, [watchlist]);
+
+  const removeFromWatchlist = useCallback((eventId: string) => {
+    setWatchlist(prev => prev.filter(item => item.id !== eventId));
+  }, []);
+
+  const isInWatchlist = useCallback((eventId: string) => {
+    return watchlist.some(item => item.id === eventId);
+  }, [watchlist]);
+
   // Memoize chart data to prevent recalculation on every render
   const chartData = useMemo(() => {
     return createOptimizedDataset(allTimeSeries);
   }, [allTimeSeries, createOptimizedDataset]);
 
-  // Memoize the entire chart component
+  // Memoize the entire chart component with responsive tooltip
   const renderTimeSeriesGraph = useMemo(() => {
     if (allTimeSeries.length === 0) return null;
 
@@ -205,8 +225,8 @@ function App() {
         });
 
         return (
-          <div className="bg-black border border-gray-600 p-3 rounded-lg max-w-xs">
-            <p className="text-white mb-2 font-semibold">{formattedDate}</p>
+          <div className="bg-black border border-gray-600 p-2 rounded-lg max-w-xs text-xs">
+            <p className="text-white mb-2 font-semibold text-sm">{formattedDate}</p>
             {payload
               .filter((entry: any) => entry.value !== undefined)
               .map((entry: any, index: number) => {
@@ -215,10 +235,9 @@ function App() {
                 if (series) {
                   const probability = (entry.value * 100).toFixed(1);
                   return (
-                    <p key={index} style={{ color: entry.color }} className="text-sm mb-1">
-                      <span className="font-medium">{series.groupItemTitle}</span>
-                      <br />
-                      <span>{probability}%</span>
+                    <p key={index} style={{ color: entry.color }} className="text-xs mb-1 leading-tight">
+                      <span className="font-medium block truncate">{series.groupItemTitle}</span>
+                      <span className="text-xs opacity-90">{probability}%</span>
                     </p>
                   );
                 }
@@ -305,39 +324,61 @@ function App() {
           </LineChart>
         </ResponsiveContainer>
         
-        {/* Summary of top 5 markets */}
+        {/* Responsive summary of top 5 markets */}
         {allTimeSeries.length > 0 && (
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
             {allTimeSeries.map((series, index) => (
               <div 
                 key={index} 
-                className="bg-gray-800 p-3 rounded-lg border-l-4"
+                className="bg-gray-800 p-2 rounded-lg border-l-4 text-xs"
                 style={{ borderLeftColor: colors[index % colors.length] }}
               >
-                <h4 className="text-white font-semibold text-sm mb-1">
+                <h4 className="text-white font-semibold text-xs mb-1 line-clamp-2">
                   #{index + 1}: {series.groupItemTitle}
                 </h4>
                 <p className="text-gray-300 text-xs">
                   Current: {(series.latestPrice * 100).toFixed(1)}%
                 </p>
                 <p className="text-gray-400 text-xs">
-                  Volume: ${series.volumeNum?.toLocaleString() || 'N/A'}
+                  Vol: ${series.volumeNum ? (series.volumeNum > 1000 ? `${(series.volumeNum/1000).toFixed(0)}K` : series.volumeNum.toLocaleString()) : 'N/A'}
                 </p>
               </div>
             ))}
           </div>
         )}
+
+        {/* Add to Watchlist Button */}
+        {currentEvent && (
+          <div className="mt-6 text-center">
+            <button
+              onClick={() => addToWatchlist(currentEvent)}
+              disabled={isInWatchlist(currentEvent.id)}
+              className={`px-6 py-2 rounded-lg font-medium transition-all ${
+                isInWatchlist(currentEvent.id)
+                  ? 'bg-green-600 text-white cursor-not-allowed'
+                  : 'bg-blue-600 hover:bg-blue-700 text-white'
+              }`}
+            >
+              {isInWatchlist(currentEvent.id) ? (
+                <>✓ Added to Watchlist</>
+              ) : (
+                <>+ Add to Watchlist</>
+              )}
+            </button>
+          </div>
+        )}
       </div>
     );
-  }, [allTimeSeries, chartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, intervalConfigs]);
+  }, [allTimeSeries, chartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, currentEvent, addToWatchlist, isInWatchlist]);
 
-  // Modified click handler to store current markets
+  // Modified click handler to store current markets and event
   const handleItemClick = useCallback((item: any) => {
     console.log(`\n=== Event: ${item.title || 'Untitled Event'} ===`);
     
     setSearchResults([]);
     setSearchTerm('');
     setSelectedEventTitle(item.title || 'Untitled Event');
+    setCurrentEvent(item);
     
     if (item.markets && item.markets.length > 0) {
       setCurrentMarkets(item.markets);
@@ -347,35 +388,112 @@ function App() {
   }, [fetchAndGraphMultipleTimeSeries, selectedInterval, intervalConfigs]);
 
   return (
-    <div className="flex flex-col items-center p-4">
-      <input 
-        className="my-4 p-3 border border-gray-600 rounded-lg w-full bg-black text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
-        type="text"
-        placeholder="Search for Polymarket events"
-        value={searchTerm}
-        onChange={handleSearch}
-      />
-      {searchResults.length > 0 && (
-        <div className="relative w-full z-50">
-          <div className="absolute top-0 left-0 right-0 bg-black border border-gray-600 rounded-lg shadow-lg max-h-96 overflow-y-auto z-50">
-            {searchResults.map(item => (
-              <div
-                key={item.id}
-                className="flex items-center p-3 border-b border-gray-700 last:border-b-0 hover:bg-gray-700 cursor-pointer transition-colors duration-200"
-                onClick={() => handleItemClick(item)}
-              >
-                <img 
-                  src={item.image} 
-                  alt={item.title}
-                  className="w-10 h-10 rounded-full flex-shrink-0 mr-3 object-cover"
-                />
-                <span className="text-white font-medium">{item.title}</span>
-              </div>
-            ))}
+    <div className="flex min-h-screen bg-black">
+      {/* Left Watchlist Ribbon */}
+      <div className="fixed left-0 top-0 h-full w-64 bg-gray-900 border-r border-gray-700 overflow-y-auto z-40">
+        <div className="p-4">
+          <h2 className="text-white text-lg font-bold mb-4">Watchlist</h2>
+          
+          {watchlist.length === 0 ? (
+            <div className="text-center text-gray-400 mt-8">
+              <Plus className="mx-auto mb-2 w-8 h-8 opacity-50" />
+              <p className="text-sm font-medium">Add events to your watchlist</p>
+              <p className="text-xs mt-1">Track your favorite Polymarket events and stay updated on their performance</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {watchlist.map((event) => (
+                <div key={event.id} className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center space-x-3 flex-1 min-w-0">
+                      <img 
+                        src={event.image} 
+                        alt={event.title}
+                        className="w-8 h-8 rounded-full flex-shrink-0 object-cover"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <h4 className="text-white text-sm font-medium line-clamp-2 mb-1">
+                          {event.title}
+                        </h4>
+                        <div className="flex items-center space-x-2 text-xs text-gray-400">
+                          <div className="flex items-center space-x-1">
+                            <TrendingUp className="w-3 h-3" />
+                            <span>{event.markets?.length || 0} markets</span>
+                          </div>
+                          <div className="flex items-center space-x-1">
+                            <DollarSign className="w-3 h-3" />
+                            <span>${event.volume ? (event.volume > 1000000 ? `${(event.volume/1000000).toFixed(1)}M` : `${(event.volume/1000).toFixed(0)}K`) : 'N/A'}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => removeFromWatchlist(event.id)}
+                      className="text-gray-400 hover:text-red-400 transition-colors ml-2 flex-shrink-0"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => handleItemClick(event)}
+                    className="w-full mt-2 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 py-1 px-2 rounded transition-colors"
+                  >
+                    View Details
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Right Sentiment Ribbon */}
+      <div className="fixed right-0 top-0 h-full w-64 bg-gray-900 border-l border-gray-700 overflow-y-auto z-40">
+        <div className="p-4">
+          <div className="mb-4">
+            <input 
+              className="w-full p-2 border border-gray-600 rounded-lg bg-black text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 text-sm"
+              type="text"
+              placeholder="Search for market sentiment"
+            />
+          </div>
+          <div className="text-center text-gray-400 mt-8">
+            <p className="text-sm">Sentiment analysis coming soon...</p>
           </div>
         </div>
-      )}
-      {renderTimeSeriesGraph}
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 ml-64 mr-64 p-4">
+        <input 
+          className="my-4 p-3 border border-gray-600 rounded-lg w-full bg-black text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
+          type="text"
+          placeholder="Search for Polymarket events"
+          value={searchTerm}
+          onChange={handleSearch}
+        />
+        {searchResults.length > 0 && (
+          <div className="relative w-full z-50">
+            <div className="absolute top-0 left-0 right-0 bg-black border border-gray-600 rounded-lg shadow-lg max-h-96 overflow-y-auto z-50">
+              {searchResults.map(item => (
+                <div
+                  key={item.id}
+                  className="flex items-center p-3 border-b border-gray-700 last:border-b-0 hover:bg-gray-700 cursor-pointer transition-colors duration-200"
+                  onClick={() => handleItemClick(item)}
+                >
+                  <img 
+                    src={item.image} 
+                    alt={item.title}
+                    className="w-10 h-10 rounded-full flex-shrink-0 mr-3 object-cover"
+                  />
+                  <span className="text-white font-medium">{item.title}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {renderTimeSeriesGraph}
+      </div>
     </div>
   );
 }
