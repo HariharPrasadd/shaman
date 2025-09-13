@@ -50,37 +50,34 @@ function App() {
   };
   
   return (
-    <div>
-      <input
+    <div className = "flex flex-col items-center p-4">
+      <input 
+        className="my-4 p-3 border border-gray-600 rounded-lg w-full bg-black text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
         type="text"
         placeholder="Search for Polymarket events"
         onChange={handleSearch}
       />
-      <table>
-      <thead>
-        <tr>
-          <th>Title</th>
-        </tr>
-      </thead>
-      <tbody>
-          {searchResults.map(item => (
-            <tr key={item.id}>
-              <td>{item.title}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
 
-      {error && <p className="text-red-500">Error: {error}</p>}
-      {data.length > 0 ? (
-        data.map((item, index) => (
-          <div key={item.id} className="mb-4 p-4 border rounded">
-            <h2>{index+1}. {item.title}</h2>
+      {searchResults.length > 0 && (
+        <div className="relative w-full">
+          <div className="absolute top-0 left-0 right-0 bg-black border border-gray-600 rounded-lg shadow-lg max-h-96 overflow-y-auto z-10">
+            {searchResults.slice(0, 10).map(item => (
+              <div
+                key={item.id}
+                className="flex items-center p-3 border-b border-gray-700 last:border-b-0 hover:bg-gray-700 cursor-pointer transition-colors duration-200"
+                onClick={() => console.log(item.ticker)}
+              >
+                <img 
+                  src={item.image} 
+                  alt={item.title}
+                  className="w-10 h-10 rounded-full flex-shrink-0 mr-3 object-cover"
+                />
+                <span className="text-white font-medium">{item.title}</span>
+              </div>
+            ))}
           </div>
-        ))
-      ) : !error ? (
-        <p>Loading...</p>
-      ) : <p>Error: 404.</p>}
+        </div>
+      )}
     </div>
   );
 }
