@@ -65,7 +65,19 @@ function App() {
               <div
                 key={item.id}
                 className="flex items-center p-3 border-b border-gray-700 last:border-b-0 hover:bg-gray-700 cursor-pointer transition-colors duration-200"
-                onClick={() => console.log(item.ticker)}
+                onClick={() => {
+                  console.log(`\n=== Event: ${item.title || 'Untitled Event'} ===`);
+                  
+                  if (item.markets && item.markets.length > 0) {
+                    item.markets.forEach((market: { question: any; clobTokenIds: any; }, index: number) => {
+                      console.log(`Market ${index + 1}:`);
+                      console.log(`  Question: ${market.question || 'No question available'}`);
+                      console.log(`  CLOB Token IDs: ${market.clobTokenIds || 'No CLOB IDs available'}`);
+                    });
+                  } else {
+                    console.log('No markets found for this event');
+                  }
+                }}
               >
                 <img 
                   src={item.image} 
