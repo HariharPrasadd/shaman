@@ -1,36 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import ReactDOM from 'react-dom/client';
 import Fuse from "fuse.js";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { X, Plus, TrendingUp, DollarSign, Search, Link as LinkIcon } from 'lucide-react';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import CCA from './cca';
-
-// Interfaces for sentiment analysis
-interface GDELTTimelineEntry {
-  datetime: string;
-  value: number;
-  norm?: number;
-  date: string;
-}
-
-interface SentimentResult {
-  marketId: string;
-  marketQuestion: string;
-  gdeltQuery: string;
-  correlation: number;
-  keywords: string[];
-  isLinked: boolean;
-}
-
-interface MarketQueryPair {
-  marketId: string;
-  marketQuestion: string;
-  gdeltQuery: string;
-  correlation: number;
-  keywords: string[];
-  isLinked: boolean;
-}
+import { X, Plus, TrendingUp, DollarSign, Search } from 'lucide-react';
 
 function App() {
   const [data, setData] = useState<any[]>([]);
@@ -49,11 +20,6 @@ function App() {
 
   // Watchlist state
   const [watchlist, setWatchlist] = useState<any[]>([]);
-  
-  // Sentiment analysis state
-  const [sentimentResults, setSentimentResults] = useState<SentimentResult[]>([]);
-  const [loadingSentiment, setLoadingSentiment] = useState<boolean>(false);
-  const [linkedPairs, setLinkedPairs] = useState<Map<string, MarketQueryPair[]>>(new Map());
   
   // Left sidebar is now always open (persistent)
 
@@ -141,23 +107,12 @@ function App() {
 
     if (!referenceSeries || referenceSeries.history.length === 0) return [];
 
-    // Use the reference series timestamps and downsample for performance
+    // Use the reference series timestamps and downsample for performance (except for shorter intervals)
     const shouldDownsample = selectedInterval === '1w' || selectedInterval === '1d';
-    let timestamps = referenceSeries.history
+    const timestamps = referenceSeries.history
       .map((point: any) => point.t * 1000)
+      .filter((_: any, index: number) => !shouldDownsample || index % 2 === 0)
       .sort((a: number, b: number) => a - b);
-
-    // Apply downsampling if needed
-    if (shouldDownsample) {
-      timestamps = timestamps.filter((_: any, index: number) => index % 2 === 0);
-    }
-
-    // Limit data points to prevent memory issues (max 1000 points)
-    const maxPoints = 1000;
-    if (timestamps.length > maxPoints) {
-      const step = Math.ceil(timestamps.length / maxPoints);
-      timestamps = timestamps.filter((_: any, index: number) => index % step === 0);
-    }
 
     const chartData = timestamps.map((timestamp: number) => {
       const dataPoint: any = { timestamp };
@@ -191,7 +146,6 @@ function App() {
   const fetchAndGraphMultipleTimeSeries = useCallback(async (markets: any[], interval: string = '1m', fidelity: string = '180') => {
     try {
       setLoadingPrices(true);
-      console.log(`Fetching data for interval: ${interval}, fidelity: ${fidelity}`);
       
       // Check if there's only one market (yes/no market)
       const isSingleMarket = markets.length === 1;
@@ -276,8 +230,6 @@ function App() {
   // New handler for interval changes
   const handleIntervalChange = useCallback((interval: string) => {
     setSelectedInterval(interval);
-    // Clear existing data to prevent memory accumulation
-    setAllTimeSeries([]);
     if (currentMarkets.length > 0) {
       const config = intervalConfigs[interval as keyof typeof intervalConfigs];
       fetchAndGraphMultipleTimeSeries(currentMarkets, config.interval, config.fidelity);
@@ -299,357 +251,14 @@ function App() {
     return watchlist.some(item => item.id === eventId);
   }, [watchlist]);
 
-  // Gemini API integration for generating GDELT queries
-  const generateQueries = useCallback(async (naturalLanguageQuery: string): Promise<string[]> => {
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    
-    if (!apiKey) {
-      throw new Error('VITE_GEMINI_API_KEY not found in environment variables');
-    }
-    const genAI = new GoogleGenerativeAI(apiKey);
-    
-    const model = genAI.getGenerativeModel({ 
-      model: "gemini-2.5-flash-lite",
-      generationConfig: {
-        temperature: 0,
-        maxOutputTokens: 1000,
-      }
-    });
-    
-    const systemPrompt = `You are a query string generator. Your task is to take any natural language input and convert it into exactly 5 query strings that follow a very strict set of formatting and logical rules.
-The purpose of this task is sentiment analysis: the goal of the generated query strings is to maximize the probability that the presence of these queries in sentiment data will track the sentiment implied by the natural language input. Later, these sentiment traces will be compared against prediction market behavior.
-Important: Even if a query is not directly related to the input question, if it could plausibly capture related sentiment that might shift prediction markets in a similar way, you must include it.
-RULES:
-1. Always generate 5 query strings total.
-2. Use the exact formatting specified below.
-3. Generate queries in 5 groups of 1:
-Group 1 (1 queries):
-- Single word queries from the input.
-- Each must be wrapped in quotes with a space after the word inside the quotes.
-- Example: "Zhao ", "Changpeng ", "pardon ", "Donald "
-Group 2 (1 queries):
-- Two word queries from the input.
-- Each must be wrapped in quotes, with a single space between the words.
-- Example: "Changpeng pardon", "trump pardon", "Zhao pardon", "trump changpeng"
-Group 3 (1 queries):
-- Two word queries separated by OR.
-- Wrap the entire expression in parentheses.
-- Words are not quoted, just plain text.
-- Example: (changpeng OR trump), (pardon OR changpeng), (trump OR pardon)
-Group 4 (1 queries):
-- Three word queries with OR.
-- Two words together are quoted, the third is unquoted.
-- The whole expression is wrapped in parentheses.
-- Example: ("Donald trump" OR pardon), ("Changpeng pardon" OR trump), ("Donald Zhao" OR pardon)
-Group 5 (1 queries):
-- Four word queries with OR.
-- Two words + two words. Each pair wrapped in quotes.
-- Entire expression wrapped in parentheses.
-- Example: ("Donald trump" OR "changpeng Zhao"), ("trump pardon" OR "Zhao pardon"), ("trump changpeng" OR "pardon Zhao")
-OUTPUT FORMAT REQUIREMENT (CRITICAL):
-You must always return only a JSON array of 5 strings that match the above rules. No additional comments, explanations, or characters outside of the JSON array are allowed. DO NOT INCLUDE MARKDOWN FENCES, COMMENTS, OR ANYTHING ELSE.`;
-    
-    const prompt = `${systemPrompt}\n\nInput: ${naturalLanguageQuery}`;
-    
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
-    
-    const queries = JSON.parse(text);
-    
-    if (!Array.isArray(queries) || queries.length !== 5) {
-      throw new Error(`Expected 5 queries, got ${queries.length}`);
-    }
-    
-    return queries;
-  }, []);
-
-  // GDELT API integration - using the exact same class from gemini-query.tsx
-  class GDELTMonthlyFetcher {
-    private baseUrl = '/gdelt/api/v2/doc/doc';
-    private mode: string;
-
-    constructor(mode: string = 'timelinetone') {
-      this.mode = mode;
-    }
-
-    private formatDateForAPI(date: Date): string {
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      const hours = String(date.getHours()).padStart(2, '0');
-      const minutes = String(date.getMinutes()).padStart(2, '0');
-      const seconds = String(date.getSeconds()).padStart(2, '0');
-      return `${year}${month}${day}${hours}${minutes}${seconds}`;
-    }
-
-    private buildQuery(baseQuery: string, source?: string, country?: string): string {
-      let query = baseQuery;
-      if (source) {
-        if (source.includes('.')) {
-          query += ` domain:${source}`;
-        } else {
-          query += ` source:${source}`;
-        }
-      }
-      if (country) {
-        query += ` sourcecountry:${country}`;
-      }
-      return query;
-    }
-
-    private filterDataByTime(data: GDELTTimelineEntry[], timeLength: string): GDELTTimelineEntry[] {
-      if (timeLength === '1m') {
-        return data.filter((_, index) => index % 3 === 0);
-      } else if (timeLength === '1w') {
-        return data.filter((_, index) => index % 2 === 0);
-      }
-      return data;
-    }
-
-    private async fetchSingleTimespan(query: string, timespan: string): Promise<GDELTTimelineEntry[]> {
-      const params = new URLSearchParams({
-        query: query,
-        mode: this.mode,
-        format: 'json',
-        timespan: timespan
-      });
-
-      const url = `${this.baseUrl}?${params.toString()}`;
-      
-      try {
-        const response = await fetch(url);
-        
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        
-        const responseText = await response.text();
-        
-        if (responseText.startsWith('Invalid') || responseText.startsWith('Error') || responseText.startsWith('Un')) {
-          console.warn(`API returned error message: ${responseText}`);
-          return [];
-        }
-        
-        const data = JSON.parse(responseText);
-        const timelineData = data.timeline?.[0]?.data || [];
-        
-        return timelineData;
-      } catch (error) {
-        console.error(`Failed to fetch data for timespan ${timespan}:`, error);
-        return [];
-      }
-    }
-
-    async fetchData(query: string, timeLength: string, source?: string, country?: string): Promise<GDELTTimelineEntry[]> {
-      const fullQuery = this.buildQuery(query, source, country);
-      
-      // For 1w, use single request
-      const data = await this.fetchSingleTimespan(fullQuery, timeLength);
-      const filteredData = this.filterDataByTime(data, timeLength);
-      
-      return filteredData;
-    }
-  }
-
-  const fetchGDELTData = useCallback(async (query: string, timeLength: string = '1w'): Promise<GDELTTimelineEntry[]> => {
-    const fetcher = new GDELTMonthlyFetcher();
-    return await fetcher.fetchData(query, timeLength, '', '');
-  }, []);
-
-  // Main sentiment analysis function
-  const performSentimentAnalysis = useCallback(async (markets: any[]) => {
-    console.log('🚀 Starting sentiment analysis for markets:', markets.length);
-    if (!markets || markets.length === 0) return;
-    
-    setLoadingSentiment(true);
-    setSentimentResults([]);
-    
-    try {
-      const sentimentResults: SentimentResult[] = [];
-      
-      // Process each market by fetching data directly (like in gemini-query.tsx)
-      console.log('Processing markets directly...');
-      
-      for (const market of markets.slice(0, 5)) { // Top 5 markets
-        try {
-          console.log(`Processing market: ${market.question}`);
-          
-          // Generate GDELT queries using Gemini
-          const gdeltQueries = await generateQueries(market.question);
-          console.log(`Generated ${gdeltQueries.length} GDELT queries:`, gdeltQueries);
-          
-          // Fetch GDELT data for each query
-          for (const query of gdeltQueries) {
-            const gdeltData = await fetchGDELTData(query, '1m');
-            console.log(`GDELT data for query "${query}":`, gdeltData.length, 'points');
-            
-            if (gdeltData.length > 0) {
-              // Fetch market price data using the existing working fetchPriceHistory function
-              const clobIds = JSON.parse(market.clobTokenIds);
-              const marketPriceData = await fetchPriceHistory(clobIds[0], '1m', '180');
-              
-              console.log(`Market price data length:`, marketPriceData?.history?.length || 0);
-              
-              if (marketPriceData?.history?.length > 0) {
-                // Convert data to CCA format
-                const marketSeries = marketPriceData.history.map((point: any) => ({
-                  timestamp: point.t * 1000,
-                  value: point.p
-                }));
-                
-                const gdeltSeries = gdeltData.map((point: GDELTTimelineEntry) => ({
-                  timestamp: new Date(point.date).getTime(),
-                  value: point.value
-                }));
-                
-                console.log(`Market series length: ${marketSeries.length}, GDELT series length: ${gdeltSeries.length}`);
-                
-                // Calculate correlation using CCA
-                const correlation = await calculateCorrelation(marketSeries, gdeltSeries);
-                console.log(`Correlation for market "${market.question}" with query "${query}": ${correlation.toFixed(2)}%`);
-                
-                // Extract keywords from query
-                const keywords = extractKeywordsFromQuery(query);
-                
-                // Add result regardless of correlation threshold for debugging
-                sentimentResults.push({
-                  marketId: market.id || market.question,
-                  marketQuestion: market.question,
-                  gdeltQuery: query,
-                  correlation: correlation,
-                  keywords: keywords,
-                  isLinked: false
-                });
-              } else {
-                console.log(`No market price data found for: ${market.question}`);
-              }
-            } else {
-              console.log(`No GDELT data for query: ${query}`);
-            }
-          }
-        } catch (error) {
-          console.error(`Error processing market ${market.question}:`, error);
-        }
-      }
-      
-      // Sort by correlation (highest first) and limit to 25
-      const sortedResults = sentimentResults
-        .sort((a, b) => b.correlation - a.correlation)
-        .slice(0, 25);
-      
-      console.log(`Total sentiment results generated: ${sentimentResults.length}`);
-      console.log(`Sorted results (top 5):`, sortedResults.slice(0, 5).map(r => ({
-        question: r.marketQuestion.substring(0, 50) + '...',
-        correlation: r.correlation.toFixed(2) + '%',
-        query: r.gdeltQuery.substring(0, 30) + '...'
-      })));
-      
-      setSentimentResults(sortedResults);
-      console.log('✅ Sentiment results set in state:', sortedResults.length);
-      
-    } catch (error) {
-      console.error('Error in sentiment analysis:', error);
-    } finally {
-      setLoadingSentiment(false);
-      console.log('🏁 Sentiment analysis completed');
-    }
-  }, [generateQueries, fetchGDELTData, fetchPriceHistory]);
-
-  // Helper function to calculate correlation using CCA component exactly as in analysis.tsx
-  const calculateCorrelation = useCallback((seriesA: any[], seriesB: any[]): Promise<number> => {
-    return new Promise((resolve) => {
-      let correlation = 0;
-      
-      const handleCorrelationCalculated = (corr: number) => {
-        correlation = corr;
-      };
-      
-      // Create a temporary div and render CCA component
-      const tempDiv = document.createElement('div');
-      const root = ReactDOM.createRoot(tempDiv);
-      
-      root.render(
-        <CCA 
-          seriesA={seriesA}
-          seriesB={seriesB}
-          onCorrelationCalculated={handleCorrelationCalculated}
-          maxLag={10}
-        />
-      );
-      
-      // Wait for calculation to complete
-      setTimeout(() => {
-        root.unmount();
-        resolve(correlation);
-      }, 200);
-    });
-  }, []);
-
-  // Helper function to extract keywords from GDELT query
-  const extractKeywordsFromQuery = useCallback((query: string): string[] => {
-    // Extract words from quotes and OR statements
-    const quotedWords = query.match(/"([^"]+)"/g) || [];
-    const orWords = query.match(/\(([^)]+)\)/g) || [];
-    
-    const keywords: string[] = [];
-    
-    quotedWords.forEach(quoted => {
-      const word = quoted.replace(/"/g, '').trim();
-      if (word) keywords.push(word);
-    });
-    
-    orWords.forEach(or => {
-      const content = or.replace(/[()]/g, '').trim();
-      const words = content.split(/\s+OR\s+/i).map(w => w.trim());
-      keywords.push(...words);
-    });
-    
-    return keywords.slice(0, 5); // Limit to 5 keywords
-  }, []);
-
-  // Link sentiment functionality
-  const linkSentiment = useCallback((result: SentimentResult) => {
-    if (!currentEvent) return;
-    
-    const eventId = currentEvent.id;
-    const newPair: MarketQueryPair = {
-      marketId: result.marketId,
-      marketQuestion: result.marketQuestion,
-      gdeltQuery: result.gdeltQuery,
-      correlation: result.correlation,
-      keywords: result.keywords,
-      isLinked: true
-    };
-    
-    setLinkedPairs(prev => {
-      const newMap = new Map(prev);
-      const existingPairs = newMap.get(eventId) || [];
-      newMap.set(eventId, [...existingPairs, newPair]);
-      return newMap;
-    });
-    
-    // Update the result to show it's linked
-    setSentimentResults(prev => 
-      prev.map(r => 
-        r.marketId === result.marketId && r.gdeltQuery === result.gdeltQuery
-          ? { ...r, isLinked: true }
-          : r
-      )
-    );
-  }, [currentEvent]);
-
   // Memoize chart data to prevent recalculation on every render
   const chartData = useMemo(() => {
     const isSingleMarket = currentMarkets.length === 1;
-    const data = createOptimizedDataset(allTimeSeries, isSingleMarket);
-    console.log(`Chart data created: ${data.length} points for interval ${selectedInterval}`);
-    return data;
-  }, [allTimeSeries, createOptimizedDataset, currentMarkets.length, selectedInterval]);
+    return createOptimizedDataset(allTimeSeries, isSingleMarket);
+  }, [allTimeSeries, createOptimizedDataset, currentMarkets.length]);
 
   // Memoize the entire chart component with responsive tooltip
   const renderTimeSeriesGraph = useMemo(() => {
-    console.log(`Rendering chart: allTimeSeries.length=${allTimeSeries.length}, chartData.length=${chartData.length}`);
     if (allTimeSeries.length === 0) return null;
 
     const isSingleMarket = currentMarkets.length === 1;
@@ -720,6 +329,12 @@ You must always return only a JSON array of 5 strings that match the above rules
               <h3 className="text-white text-2xl font-semibold  tracking-tight">
                 {selectedEventTitle || 'Price History'}
               </h3>
+              {loadingPrices && (
+                <div className="flex items-center mt-2">
+                  <div className="animate-spin w-4 h-4 border-2 border-white/20 border-t-white rounded-full mr-2" />
+                  <span className="text-white/60 text-sm ">Loading market data...</span>
+                </div>
+              )}
             </div>
             
             {/* Interval buttons with shadcn styling */}
@@ -907,11 +522,8 @@ You must always return only a JSON array of 5 strings that match the above rules
       setCurrentMarkets(item.markets);
       const config = intervalConfigs[selectedInterval as keyof typeof intervalConfigs];
       fetchAndGraphMultipleTimeSeries(item.markets, config.interval, config.fidelity);
-      
-      // Trigger sentiment analysis
-      performSentimentAnalysis(item.markets);
     }
-  }, [fetchAndGraphMultipleTimeSeries, selectedInterval, intervalConfigs, performSentimentAnalysis]);
+  }, [fetchAndGraphMultipleTimeSeries, selectedInterval, intervalConfigs]);
 
   return (
     <div className="min-h-screen bg-black">
@@ -996,82 +608,12 @@ You must always return only a JSON array of 5 strings that match the above rules
               />
             </div>
           </div>
-          {loadingSentiment ? (
-            <div className="text-center text-white/40 mt-12">
-              <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
-                <div className="animate-spin w-6 h-6 border-2 border-white/20 border-t-white rounded-full" />
-              </div>
-              <p className="text-sm font-medium">Analyzing sentiment...</p>
+          <div className="text-center text-white/40 mt-12">
+            <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
+              <TrendingUp className="w-6 h-6" />
             </div>
-          ) : sentimentResults.length > 0 ? (
-            <div className="space-y-3">
-              {sentimentResults.map((result, index) => (
-                <div key={`${result.marketId}-${index}`} className="bg-white/5 hover:bg-white/8 rounded-xl p-4 border border-white/10 hover:border-white/20 transition-all duration-200">
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="flex-1 min-w-0">
-                      <h4 className="text-white text-sm font-medium line-clamp-2 mb-2">
-                        {result.marketQuestion}
-                      </h4>
-                      <div className="flex flex-wrap gap-1 mb-2">
-                        {result.keywords.slice(0, 3).map((keyword, i) => (
-                          <span key={i} className="text-xs bg-white/10 text-white/70 px-2 py-1 rounded">
-                            {keyword}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-2 ml-3">
-                      <div 
-                        className={`w-3 h-3 rounded-full ${
-                          result.correlation >= 70 ? 'bg-green-500' :
-                          result.correlation >= 40 ? 'bg-orange-500' : 'bg-red-500'
-                        }`}
-                      />
-                      <span className="text-white font-medium text-sm">
-                        {result.correlation.toFixed(1)}%
-                      </span>
-                    </div>
-                  </div>
-                  
-                  <div className="text-xs text-white/50 mb-3 line-clamp-2">
-                    Query: {result.gdeltQuery}
-                  </div>
-                  
-                  <button
-                    onClick={() => linkSentiment(result)}
-                    disabled={!isInWatchlist(currentEvent?.id || '') || result.isLinked}
-                    className={`w-full text-xs py-2 px-3 rounded-lg transition-all font-medium border ${
-                      result.isLinked
-                        ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 cursor-not-allowed'
-                        : !isInWatchlist(currentEvent?.id || '')
-                        ? 'bg-white/5 text-white/30 border-white/10 cursor-not-allowed'
-                        : 'bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border-white/10 hover:border-white/20'
-                    }`}
-                    title={!isInWatchlist(currentEvent?.id || '') ? 'Add event to watchlist to link sentiment' : result.isLinked ? 'Already linked' : 'Link this sentiment analysis'}
-                  >
-                    {result.isLinked ? (
-                      <>
-                        <LinkIcon className="w-3 h-3 mr-1 inline" />
-                        Linked
-                      </>
-                    ) : (
-                      <>
-                        <LinkIcon className="w-3 h-3 mr-1 inline" />
-                        Link Sentiment
-                      </>
-                    )}
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center text-white/40 mt-12">
-              <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
-                <TrendingUp className="w-6 h-6" />
-              </div>
-              <p className="text-sm font-medium">Select an event to analyze sentiment</p>
-            </div>
-          )}
+            <p className="text-sm  font-medium">Sentiment analysis coming soon...</p>
+          </div>
         </div>
       </div>
 

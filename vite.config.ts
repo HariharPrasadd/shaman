@@ -1,7 +1,7 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import path from "path"
-import tailwindcss from "@tailwindcss/vite"
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import path from "path";
+import tailwindcss from "@tailwindcss/vite";
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -13,11 +13,16 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': {
-        target: 'https://gamma-api.polymarket.com',
+      "/api": {
+        target: "https://gamma-api.polymarket.com",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, '')
-      }
-    }
-  }
-})
+        rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+      "/gdelt": {
+        target: "https://api.gdeltproject.org",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/gdelt/, ""),
+      },
+    },
+  },
+});
