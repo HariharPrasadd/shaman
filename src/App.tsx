@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
 import Fuse from "fuse.js";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { X, Plus, TrendingUp, DollarSign, Search, Link as LinkIcon, HelpCircle } from 'lucide-react';
+import { X, Plus, TrendingUp, DollarSign, Search, Link as LinkIcon, HelpCircle, Unlink } from 'lucide-react';
+import { Skeleton } from './components/ui/skeleton';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import CCA from './cca';
 
@@ -58,6 +59,10 @@ function App() {
   // Cache for price history data - key: "marketId_interval_fidelity", value: { data, timestamp }
   const [priceHistoryCache, setPriceHistoryCache] = useState<Map<string, { data: any, timestamp: number }>>(new Map());
   
+  // Sentiment search state
+  const [sentimentSearchTerm, setSentimentSearchTerm] = useState<string>('');
+  const [filteredSentimentResults, setFilteredSentimentResults] = useState<SentimentResult[]>([]);
+  
   // Left sidebar is now always open (persistent)
 
   // Interval configurations
@@ -98,6 +103,21 @@ function App() {
     return new Fuse(data, options);
   }, [data]);
 
+  // Memoize Fuse instance for sentiment search
+  const sentimentFuse = useMemo(() => {
+    const options = {
+      includeScore: true,
+      includeMatches: true,
+      threshold: 0.3,
+      keys: [
+        "marketQuestion",
+        "gdeltQuery", 
+        "keywords"
+      ],
+    };
+    return new Fuse(sentimentResults, options);
+  }, [sentimentResults]);
+
   // Debounced search with useMemo for performance
   const debouncedSearchResults = useMemo(() => {
     if (searchTerm.length === 0) return [];
@@ -111,6 +131,28 @@ function App() {
     setSearchTerm(value);
     setSearchResults(value.length === 0 ? [] : debouncedSearchResults);
   }, [debouncedSearchResults]);
+
+  // Sentiment search handler
+  const handleSentimentSearch = useCallback((event: { target: { value: string; }; }) => {
+    const { value } = event.target;
+    setSentimentSearchTerm(value);
+    
+    if (value.length === 0) {
+      setFilteredSentimentResults(sentimentResults);
+    } else {
+      const searchResults = sentimentFuse.search(value);
+      // Sort by correlation percentage (highest first) after text matching
+      const sortedResults = searchResults
+        .map(result => result.item)
+        .sort((a, b) => b.correlation - a.correlation);
+      setFilteredSentimentResults(sortedResults);
+    }
+  }, [sentimentResults, sentimentFuse]);
+
+  // Update filtered results when sentiment results change
+  useEffect(() => {
+    setFilteredSentimentResults(sentimentResults);
+  }, [sentimentResults]);
 
   // Modified price history fetching to accept interval and fidelity parameters with caching
   const fetchPriceHistory = useCallback(async (clobID: string, interval = '1m', fidelity='180') => {
@@ -261,8 +303,11 @@ function App() {
           setAllTimeSeries(allSeries);
         }
       } else {
-        // Original logic for multiple markets
-        const allSeriesPromises = markets.map(async (market) => {
+        // Only process top 5 markets for performance
+        const top5Markets = markets.slice(0, 5);
+        console.log(`Processing only top 5 markets (${top5Markets.length}) out of ${markets.length} total markets`);
+        
+        const allSeriesPromises = top5Markets.map(async (market) => {
           const clobIds = JSON.parse(market.clobTokenIds);
           const priceData = await fetchPriceHistory(clobIds[0], interval, fidelity);
           
@@ -282,13 +327,12 @@ function App() {
 
         const allSeries = (await Promise.all(allSeriesPromises)).filter(Boolean) as Array<NonNullable<typeof markets[0]>>;
         
-        // Filter out any null or undefined series just in case, then sort by latest price
-        const validSeries = allSeries.filter((series): series is typeof allSeries[0] & { latestPrice: number } => !!series && typeof series.latestPrice === 'number');
-        const top5Series = validSeries
-          .sort((a, b) => b.latestPrice - a.latestPrice)
-          .slice(0, 5);
+        // Sort by latest price (already limited to top 5)
+        const sortedSeries = allSeries
+          .filter((series): series is typeof allSeries[0] & { latestPrice: number } => !!series && typeof series.latestPrice === 'number')
+          .sort((a, b) => b.latestPrice - a.latestPrice);
 
-        setAllTimeSeries(top5Series);
+        setAllTimeSeries(sortedSeries);
       }
       
     } catch (error) {
@@ -480,96 +524,118 @@ You must always return only a JSON array of 5 strings that match the above rules
     return await fetcher.fetchData(query, timeLength, '', '');
   }, []);
 
-  // Main sentiment analysis function
+  // Optimized sentiment analysis function with parallel processing
   const performSentimentAnalysis = useCallback(async (markets: any[]) => {
-    console.log('🚀 Starting sentiment analysis for markets:', markets.length);
+    console.log('🚀 Starting optimized sentiment analysis for markets:', markets.length);
     if (!markets || markets.length === 0) return;
     
     setLoadingSentiment(true);
     setSentimentResults([]);
     
     try {
-      const sentimentResults: SentimentResult[] = [];
+      // Only process top 5 markets for performance
+      const top5Markets = markets.slice(0, 5);
+      console.log(`Processing only top 5 markets (${top5Markets.length}) out of ${markets.length} total markets`);
       
-      // Process each market by fetching data directly (like in gemini-query.tsx)
-      console.log('Processing markets directly...');
-      
-      for (const market of markets.slice(0, 5)) { // Top 5 markets
+      // Process all markets in parallel for maximum speed
+      const marketPromises = top5Markets.map(async (market) => {
         try {
-          console.log(`Processing market: ${market.question}`);
+          console.log(`🔄 Processing market: ${market.question.substring(0, 50)}...`);
           
           // Generate GDELT queries using Gemini
           const gdeltQueries = await generateQueries(market.question);
-          console.log(`Generated ${gdeltQueries.length} GDELT queries:`, gdeltQueries);
+          console.log(`Generated ${gdeltQueries.length} GDELT queries for market`);
           
-          // Fetch GDELT data for each query
-          for (const query of gdeltQueries) {
-            const gdeltData = await fetchGDELTData(query, '1m');
-            console.log(`GDELT data for query "${query}":`, gdeltData.length, 'points');
-            
-            if (gdeltData.length > 0) {
-              // Fetch market price data using the existing working fetchPriceHistory function
-              const clobIds = JSON.parse(market.clobTokenIds);
-              const marketPriceData = await fetchPriceHistory(clobIds[0], '1m', '180');
-              
-              console.log(`Market price data length:`, marketPriceData?.history?.length || 0);
-              
-              if (marketPriceData?.history?.length > 0) {
-                // Convert data to CCA format
-                const marketSeries = marketPriceData.history.map((point: any) => ({
-                  timestamp: point.t * 1000,
-                  value: point.p
-                }));
-                
-                const gdeltSeries = gdeltData.map((point: GDELTTimelineEntry) => ({
-                  timestamp: new Date(point.date).getTime(),
-                  value: point.value
-                }));
-                
-                console.log(`Market series length: ${marketSeries.length}, GDELT series length: ${gdeltSeries.length}`);
-                
-                // Calculate correlation using CCA
-                const correlation = await calculateCorrelation(marketSeries, gdeltSeries);
-                console.log(`Correlation for market "${market.question}" with query "${query}": ${correlation.toFixed(2)}%`);
-                
-                // Extract keywords from query
-                const keywords = extractKeywordsFromQuery(query);
-                
-                // Add result regardless of correlation threshold for debugging
-                sentimentResults.push({
-                  marketId: market.id || market.question,
-                  marketQuestion: market.question,
-                  gdeltQuery: query,
-                  correlation: correlation,
-                  keywords: keywords,
-                  isLinked: false
-                });
-              } else {
-                console.log(`No market price data found for: ${market.question}`);
-              }
-            } else {
-              console.log(`No GDELT data for query: ${query}`);
-            }
+          // Limit to first 3 queries per market for speed (reduced from 5)
+          const limitedQueries = gdeltQueries.slice(0, 3);
+          console.log(`Processing only first 3 queries (${limitedQueries.length}) out of ${gdeltQueries.length} total queries`);
+          
+          // Pre-fetch market price data once per market (not per query)
+          const clobIds = JSON.parse(market.clobTokenIds);
+          const marketPriceData = await fetchPriceHistory(clobIds[0], '1m', '180');
+          
+          if (!marketPriceData?.history?.length) {
+            console.log(`No market price data found for: ${market.question}`);
+            return [];
           }
+          
+          // Convert market data once
+          const marketSeries = marketPriceData.history.map((point: any) => ({
+            timestamp: point.t * 1000,
+            value: point.p
+          }));
+          
+          console.log(`Market series length: ${marketSeries.length}`);
+          
+          // Process all queries for this market in parallel
+          const queryPromises = limitedQueries.map(async (query) => {
+            try {
+              const gdeltData = await fetchGDELTData(query, '1m');
+              
+              if (gdeltData.length === 0) {
+                console.log(`No GDELT data for query: ${query.substring(0, 30)}...`);
+                return null;
+              }
+              
+              // Convert GDELT data
+              const gdeltSeries = gdeltData.map((point: GDELTTimelineEntry) => ({
+                timestamp: new Date(point.date).getTime(),
+                value: point.value
+              }));
+              
+              // Calculate correlation using CCA
+              const correlation = await calculateCorrelation(marketSeries, gdeltSeries);
+              console.log(`Correlation calculated: ${correlation.toFixed(2)}%`);
+              
+              // Extract keywords from query
+              const keywords = extractKeywordsFromQuery(query);
+              
+              return {
+                marketId: market.id || market.question,
+                marketQuestion: market.question,
+                gdeltQuery: query,
+                correlation: correlation,
+                keywords: keywords,
+                isLinked: false
+              } as SentimentResult;
+              
+            } catch (error) {
+              console.error(`Error processing query "${query.substring(0, 30)}...":`, error);
+              return null;
+            }
+          });
+          
+          // Wait for all queries for this market to complete
+          const results = await Promise.all(queryPromises);
+          const validResults = results.filter(Boolean) as SentimentResult[];
+          
+          // Update state with results from this market immediately
+          if (validResults.length > 0) {
+            setSentimentResults(prevResults => {
+              const updatedResults = [...prevResults, ...validResults];
+              // Sort by correlation (highest first) and limit to 15 (reduced from 25)
+              const sortedResults = updatedResults
+                .sort((a, b) => b.correlation - a.correlation)
+                .slice(0, 15);
+              
+              console.log(`🔄 Updated sentiment results: ${sortedResults.length} total results`);
+              return sortedResults;
+            });
+          }
+          
+          return validResults;
+          
         } catch (error) {
           console.error(`Error processing market ${market.question}:`, error);
+          return [];
         }
-      }
+      });
       
-      // Sort by correlation (highest first) and limit to 25
-      const sortedResults = sentimentResults
-        .sort((a, b) => b.correlation - a.correlation)
-        .slice(0, 25);
+      // Wait for all markets to complete
+      const allResults = await Promise.all(marketPromises);
+      const totalResults = allResults.flat();
       
-      console.log(`Total sentiment results generated: ${sentimentResults.length}`);
-      console.log(`Sorted results (top 5):`, sortedResults.slice(0, 5).map(r => ({
-        question: r.marketQuestion.substring(0, 50) + '...',
-        correlation: r.correlation.toFixed(2) + '%',
-        query: r.gdeltQuery.substring(0, 30) + '...'
-      })));
-      
-      setSentimentResults(sortedResults);
-      console.log('✅ Sentiment results set in state:', sortedResults.length);
+      console.log(`🏁 All sentiment analysis completed. Total results: ${totalResults.length}`);
       
     } catch (error) {
       console.error('Error in sentiment analysis:', error);
@@ -657,6 +723,32 @@ You must always return only a JSON array of 5 strings that match the above rules
       prev.map(r => 
         r.marketId === result.marketId && r.gdeltQuery === result.gdeltQuery
           ? { ...r, isLinked: true }
+          : r
+      )
+    );
+  }, [currentEvent]);
+
+  // Unlink sentiment functionality
+  const unlinkSentiment = useCallback((result: SentimentResult) => {
+    if (!currentEvent) return;
+    
+    const eventId = currentEvent.id;
+    
+    setLinkedPairs(prev => {
+      const newMap = new Map(prev);
+      const existingPairs = newMap.get(eventId) || [];
+      const filteredPairs = existingPairs.filter(pair => 
+        !(pair.marketId === result.marketId && pair.gdeltQuery === result.gdeltQuery)
+      );
+      newMap.set(eventId, filteredPairs);
+      return newMap;
+    });
+    
+    // Update the result to show it's unlinked
+    setSentimentResults(prev => 
+      prev.map(r => 
+        r.marketId === result.marketId && r.gdeltQuery === result.gdeltQuery
+          ? { ...r, isLinked: false }
           : r
       )
     );
@@ -1013,33 +1105,60 @@ You must always return only a JSON array of 5 strings that match the above rules
               <h2 className="text-white text-lg font-semibold tracking-tight">Sentiment</h2>
               <div className="group relative">
                 <HelpCircle className="w-4 h-4 text-white/40 hover:text-white/70 transition-colors cursor-pointer" />
-                <div className="absolute top-full -left-20 mt-2 px-3 py-2 bg-black/95 backdrop-blur-sm border border-white/10 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-[60] w-96">
+                <div className="absolute top-full -left-20 mt-2 px-3 py-2 bg-black/95 backdrop-blur-sm border border-white/10 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-[60] w-72">
                   <div className="text-white text-xs font-medium leading-relaxed">
-                    Analyzes news sentiment and correlates it with market price movements to identify predictive relationships
+                    Link sentiments to markets for predictive alerts and useful visualizations
                   </div>
                   <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-b-4 border-transparent border-b-white/10"></div>
                 </div>
               </div>
             </div>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-white/40" />
+            <div className="relative group">
+              <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-white/40" />
               <input 
-                className="w-full h-11 pl-10 pr-4 bg-white/5 border border-white/10 rounded-xl text-white placeholder:text-white/40 focus:outline-none focus:border-white/30 focus:bg-white/8 transition-all  text-sm"
+                className="w-full h-12 pl-12 pr-4 bg-white/5 border border-white/10 rounded-xl text-white placeholder:text-white/40 focus:outline-none focus:border-white/30 focus:bg-white/8 transition-all backdrop-blur-sm disabled:opacity-50"
                 type="text"
-                placeholder="Search for market sentiment"
+                placeholder="Search sentiments"
+                value={sentimentSearchTerm}
+                onChange={handleSentimentSearch}
+                disabled={loadingSentiment || sentimentResults.length === 0}
               />
+              {/* Tooltip for disabled state */}
+              {(loadingSentiment || sentimentResults.length === 0) && (
+                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-black/95 backdrop-blur-sm border border-white/10 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-[60] whitespace-nowrap">
+                  <div className="text-white text-xs font-medium leading-relaxed">
+                    Select an event to generate sentiments!
+                  </div>
+                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-white/10"></div>
+                </div>
+              )}
             </div>
           </div>
           {loadingSentiment ? (
-            <div className="text-center text-white/40 mt-12">
-              <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
-                <div className="animate-spin w-6 h-6 border-2 border-white/20 border-t-white rounded-full" />
-              </div>
-              <p className="text-sm font-medium">Analyzing sentiment...</p>
+            <div className="space-y-4 mt-4">
+              {/* Generate 8 skeleton components */}
+              {Array.from({ length: 8 }).map((_, index) => (
+                <div key={index} className="bg-white/5 border border-white/10 rounded-xl p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <Skeleton className="h-4 w-3/4 bg-white/10" />
+                    <Skeleton className="h-6 w-16 bg-white/10 rounded-full" />
+                  </div>
+                  <div className="space-y-2 mb-3">
+                    <Skeleton className="h-3 w-full bg-white/10" />
+                    <Skeleton className="h-3 w-2/3 bg-white/10" />
+                  </div>
+                  <div className="flex flex-wrap gap-1 mb-3">
+                    <Skeleton className="h-5 w-16 bg-white/10 rounded-full" />
+                    <Skeleton className="h-5 w-20 bg-white/10 rounded-full" />
+                    <Skeleton className="h-5 w-14 bg-white/10 rounded-full" />
+                  </div>
+                  <Skeleton className="h-8 w-full bg-white/10 rounded-lg" />
+                </div>
+              ))}
             </div>
-          ) : sentimentResults.length > 0 ? (
+          ) : filteredSentimentResults.length > 0 ? (
             <div className="space-y-3">
-              {sentimentResults.map((result, index) => (
+              {filteredSentimentResults.map((result, index) => (
                 <div key={`${result.marketId}-${index}`} className="bg-white/5 hover:bg-white/8 rounded-xl p-4 border border-white/10 hover:border-white/20 transition-all duration-200">
                   <div className="flex items-start justify-between mb-3">
                     <div className="flex-1 min-w-0">
@@ -1073,11 +1192,11 @@ You must always return only a JSON array of 5 strings that match the above rules
                   
                   <div className="group relative">
                     <button
-                      onClick={() => linkSentiment(result)}
-                      disabled={!isInWatchlist(currentEvent?.id || '') || result.isLinked}
+                      onClick={() => result.isLinked ? unlinkSentiment(result) : linkSentiment(result)}
+                      disabled={!isInWatchlist(currentEvent?.id || '')}
                       className={`w-full text-xs py-2 px-3 rounded-lg transition-all font-medium border ${
                         result.isLinked
-                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 cursor-not-allowed'
+                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 hover:bg-red-500/20 hover:text-red-400 hover:border-red-500/30'
                           : !isInWatchlist(currentEvent?.id || '')
                           ? 'bg-white/5 text-white/30 border-white/10 cursor-not-allowed'
                           : 'bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border-white/10 hover:border-white/20'
@@ -1085,8 +1204,12 @@ You must always return only a JSON array of 5 strings that match the above rules
                     >
                       {result.isLinked ? (
                         <>
-                          <LinkIcon className="w-3 h-3 mr-1 inline" />
-                          Linked
+                          <div className="inline-flex items-center">
+                            <LinkIcon className="w-3 h-3 mr-1 group-hover:hidden" />
+                            <Unlink className="w-3 h-3 mr-1 hidden group-hover:inline" />
+                            <span className="group-hover:hidden">Linked</span>
+                            <span className="hidden group-hover:inline">Unlink</span>
+                          </div>
                         </>
                       ) : (
                         <>
@@ -1097,7 +1220,7 @@ You must always return only a JSON array of 5 strings that match the above rules
                     </button>
                     
                     {/* Tooltip for inactive button */}
-                    {(!isInWatchlist(currentEvent?.id || '') && !result.isLinked) && (
+                    {!isInWatchlist(currentEvent?.id || '') && (
                       <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-black/95 backdrop-blur-sm border border-white/10 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50 whitespace-nowrap">
                         <div className="text-white text-xs font-medium leading-relaxed">
                           Add event to watchlist first
@@ -1108,6 +1231,13 @@ You must always return only a JSON array of 5 strings that match the above rules
                   </div>
                 </div>
               ))}
+            </div>
+          ) : sentimentResults.length > 0 ? (
+            <div className="text-center text-white/40 mt-12">
+              <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
+                <Search className="w-6 h-6" />
+              </div>
+              <p className="text-sm font-medium">No sentiments found matching your search</p>
             </div>
           ) : (
             <div className="text-center text-white/40 mt-12">
