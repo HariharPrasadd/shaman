@@ -3,7 +3,6 @@ import Fuse from "fuse.js";
 
 function App() {
   const [data, setData] = useState<any[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState(data);
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
 
@@ -22,7 +21,7 @@ function App() {
       }
       setData(allData);
     };
-    fetchAll().catch(err => setError(err.message));
+    fetchAll().catch(err => console.error('Failed to fetch data:', err));
   }, []);
 
   const options = {

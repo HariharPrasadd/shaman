@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
 import Fuse from "fuse.js";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { X, Plus, TrendingUp, DollarSign, Search, Link as LinkIcon } from 'lucide-react';
+import { X, Plus, TrendingUp, DollarSign, Search, Link as LinkIcon, HelpCircle } from 'lucide-react';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import CCA from './cca';
 
@@ -54,6 +54,9 @@ function App() {
   const [sentimentResults, setSentimentResults] = useState<SentimentResult[]>([]);
   const [loadingSentiment, setLoadingSentiment] = useState<boolean>(false);
   const [linkedPairs, setLinkedPairs] = useState<Map<string, MarketQueryPair[]>>(new Map());
+  
+  // Cache for price history data - key: "marketId_interval_fidelity", value: { data, timestamp }
+  const [priceHistoryCache, setPriceHistoryCache] = useState<Map<string, { data: any, timestamp: number }>>(new Map());
   
   // Left sidebar is now always open (persistent)
 
@@ -109,9 +112,23 @@ function App() {
     setSearchResults(value.length === 0 ? [] : debouncedSearchResults);
   }, [debouncedSearchResults]);
 
-  // Modified price history fetching to accept interval and fidelity parameters
+  // Modified price history fetching to accept interval and fidelity parameters with caching
   const fetchPriceHistory = useCallback(async (clobID: string, interval = '1m', fidelity='180') => {
+    // Create cache key
+    const cacheKey = `${clobID}_${interval}_${fidelity}`;
+    const now = Date.now();
+    
+    // Check if data exists in cache and is still fresh (cache for 5 minutes)
+    const cacheExpiry = 5 * 60 * 1000; // 5 minutes in milliseconds
+    const cachedData = priceHistoryCache.get(cacheKey);
+    
+    if (cachedData && (now - cachedData.timestamp) < cacheExpiry) {
+      console.log(`Using cached data for ${cacheKey}`);
+      return cachedData.data;
+    }
+    
     try {
+      console.log(`Fetching fresh data for ${cacheKey}`);
       const response = await fetch(
         `https://clob.polymarket.com/prices-history?market=${clobID}&interval=${interval}&fidelity=${fidelity}`
       );
@@ -121,13 +138,21 @@ function App() {
       }
       
       const priceData = await response.json();
+      
+      // Store in cache
+      setPriceHistoryCache(prev => {
+        const newCache = new Map(prev);
+        newCache.set(cacheKey, { data: priceData, timestamp: now });
+        return newCache;
+      });
+      
       return priceData;
       
     } catch (error) {
       console.error(`Error fetching price history for CLOB ID ${clobID}:`, error);
       return null;
     }
-  }, []);
+  }, [priceHistoryCache]);
 
   // Modified to create dataset for top 5 series or single market with two CLOB IDs
   const createOptimizedDataset = useCallback((allSeries: any[], isSingleMarket: boolean = false) => {
@@ -276,8 +301,6 @@ function App() {
   // New handler for interval changes
   const handleIntervalChange = useCallback((interval: string) => {
     setSelectedInterval(interval);
-    // Clear existing data to prevent memory accumulation
-    setAllTimeSeries([]);
     if (currentMarkets.length > 0) {
       const config = intervalConfigs[interval as keyof typeof intervalConfigs];
       fetchAndGraphMultipleTimeSeries(currentMarkets, config.interval, config.fidelity);
@@ -916,7 +939,7 @@ You must always return only a JSON array of 5 strings that match the above rules
   return (
     <div className="min-h-screen bg-black">
       {/* Left Watchlist Ribbon - Persistent */}
-      <div className="fixed left-0 top-0 h-full w-80 bg-black border-r border-white/10 overflow-y-auto z-50">
+      <div className="fixed left-0 top-0 h-full w-80 bg-black border-r border-white/10 overflow-y-auto overflow-x-hidden z-50">
         <div className="p-4">
           {/* Header */}
           <div className="mb-6">
@@ -983,10 +1006,21 @@ You must always return only a JSON array of 5 strings that match the above rules
       </div>
 
       {/* Right Sentiment Ribbon - Always Open */}
-      <div className="fixed right-0 top-0 h-full w-80 bg-black border-l border-white/10 overflow-y-auto z-50">
+      <div className="fixed right-0 top-0 h-full w-80 bg-black border-l border-white/10 overflow-y-auto overflow-x-hidden z-50">
         <div className="p-4">
           <div className="mb-6">
-            <h2 className="text-white text-lg font-semibold  tracking-tight mb-4">Sentiment</h2>
+            <div className="flex items-center space-x-2 mb-4">
+              <h2 className="text-white text-lg font-semibold tracking-tight">Sentiment</h2>
+              <div className="group relative">
+                <HelpCircle className="w-4 h-4 text-white/40 hover:text-white/70 transition-colors cursor-pointer" />
+                <div className="absolute top-full -left-20 mt-2 px-3 py-2 bg-black/95 backdrop-blur-sm border border-white/10 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-[60] w-96">
+                  <div className="text-white text-xs font-medium leading-relaxed">
+                    Analyzes news sentiment and correlates it with market price movements to identify predictive relationships
+                  </div>
+                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-b-4 border-transparent border-b-white/10"></div>
+                </div>
+              </div>
+            </div>
             <div className="relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-white/40" />
               <input 
@@ -1037,30 +1071,41 @@ You must always return only a JSON array of 5 strings that match the above rules
                     Query: {result.gdeltQuery}
                   </div>
                   
-                  <button
-                    onClick={() => linkSentiment(result)}
-                    disabled={!isInWatchlist(currentEvent?.id || '') || result.isLinked}
-                    className={`w-full text-xs py-2 px-3 rounded-lg transition-all font-medium border ${
-                      result.isLinked
-                        ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 cursor-not-allowed'
-                        : !isInWatchlist(currentEvent?.id || '')
-                        ? 'bg-white/5 text-white/30 border-white/10 cursor-not-allowed'
-                        : 'bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border-white/10 hover:border-white/20'
-                    }`}
-                    title={!isInWatchlist(currentEvent?.id || '') ? 'Add event to watchlist to link sentiment' : result.isLinked ? 'Already linked' : 'Link this sentiment analysis'}
-                  >
-                    {result.isLinked ? (
-                      <>
-                        <LinkIcon className="w-3 h-3 mr-1 inline" />
-                        Linked
-                      </>
-                    ) : (
-                      <>
-                        <LinkIcon className="w-3 h-3 mr-1 inline" />
-                        Link Sentiment
-                      </>
+                  <div className="group relative">
+                    <button
+                      onClick={() => linkSentiment(result)}
+                      disabled={!isInWatchlist(currentEvent?.id || '') || result.isLinked}
+                      className={`w-full text-xs py-2 px-3 rounded-lg transition-all font-medium border ${
+                        result.isLinked
+                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 cursor-not-allowed'
+                          : !isInWatchlist(currentEvent?.id || '')
+                          ? 'bg-white/5 text-white/30 border-white/10 cursor-not-allowed'
+                          : 'bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border-white/10 hover:border-white/20'
+                      }`}
+                    >
+                      {result.isLinked ? (
+                        <>
+                          <LinkIcon className="w-3 h-3 mr-1 inline" />
+                          Linked
+                        </>
+                      ) : (
+                        <>
+                          <LinkIcon className="w-3 h-3 mr-1 inline" />
+                          Link Sentiment
+                        </>
+                      )}
+                    </button>
+                    
+                    {/* Tooltip for inactive button */}
+                    {(!isInWatchlist(currentEvent?.id || '') && !result.isLinked) && (
+                      <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-black/95 backdrop-blur-sm border border-white/10 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50 whitespace-nowrap">
+                        <div className="text-white text-xs font-medium leading-relaxed">
+                          Add event to watchlist first
+                        </div>
+                        <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-white/10"></div>
+                      </div>
                     )}
-                  </button>
+                  </div>
                 </div>
               ))}
             </div>
