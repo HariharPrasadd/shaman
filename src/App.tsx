@@ -55,9 +55,13 @@ function App() {
   const [sentimentResults, setSentimentResults] = useState<SentimentResult[]>([]);
   const [loadingSentiment, setLoadingSentiment] = useState<boolean>(false);
   const [linkedPairs, setLinkedPairs] = useState<Map<string, MarketQueryPair[]>>(new Map());
+  const [sentimentCache, setSentimentCache] = useState<Map<string, SentimentResult[]>>(new Map());
   
   // Cache for price history data - key: "marketId_interval_fidelity", value: { data, timestamp }
   const [priceHistoryCache, setPriceHistoryCache] = useState<Map<string, { data: any, timestamp: number }>>(new Map());
+  
+  // Cache for event data to prevent re-fetching
+  const [eventDataCache, setEventDataCache] = useState<Map<string, any[]>>(new Map());
   
   // Sentiment search state
   const [sentimentSearchTerm, setSentimentSearchTerm] = useState<string>('');
@@ -76,6 +80,17 @@ function App() {
 
   useEffect(() => {
     const fetchAll = async () => {
+      // Check if we have cached data
+      const cacheKey = 'main_events';
+      const cachedData = eventDataCache.get(cacheKey);
+      
+      if (cachedData && cachedData.length > 0) {
+        console.log('✅ Using cached event data');
+        setData(cachedData);
+        return;
+      }
+      
+      console.log('🔄 Fetching fresh event data...');
       const limit = 500;
       let offset = 0;
       let allData: React.SetStateAction<any[]> = [];
@@ -87,18 +102,28 @@ function App() {
         if (batch.length < limit) break;
         offset += limit;
       }
+      
       setData(allData);
+      
+      // Cache the data
+      setEventDataCache(prevCache => {
+        const newCache = new Map(prevCache);
+        newCache.set(cacheKey, allData);
+        console.log('💾 Cached event data');
+        return newCache;
+      });
     };
     fetchAll().catch(err => console.error('Failed to fetch data:', err));
-  }, []);
+  }, [eventDataCache]);
 
   // Memoize Fuse instance to avoid recreating it on every render
   const fuse = useMemo(() => {
     const options = {
       includeScore: true,
       includeMatches: true,
-      threshold: 0.2,
+      threshold: 0.3, // Slightly relaxed for better results
       keys: ["title"],
+      limit: 50, // Limit results for better performance
     };
     return new Fuse(data, options);
   }, [data]);
@@ -108,12 +133,13 @@ function App() {
     const options = {
       includeScore: true,
       includeMatches: true,
-      threshold: 0.3,
+      threshold: 0.4, // Slightly stricter for better relevance
       keys: [
         "marketQuestion",
         "gdeltQuery", 
         "keywords"
       ],
+      limit: 25, // Limit results for better performance
     };
     return new Fuse(sentimentResults, options);
   }, [sentimentResults]);
@@ -524,11 +550,71 @@ You must always return only a JSON array of 5 strings that match the above rules
     return await fetcher.fetchData(query, timeLength, '', '');
   }, []);
 
-  // Optimized sentiment analysis function with parallel processing
+  // Optimized sentiment analysis function with caching and parallel processing
   const performSentimentAnalysis = useCallback(async (markets: any[]) => {
     console.log('🚀 Starting optimized sentiment analysis for markets:', markets.length);
     if (!markets || markets.length === 0) return;
     
+    // Create cache key from market IDs
+    const cacheKey = markets.slice(0, 5).map(m => m.id || m.question).join('_');
+    
+    // Check if we have cached results for this set of markets
+    const cachedResults = sentimentCache.get(cacheKey);
+    console.log('🔍 Checking cache for key:', cacheKey);
+    console.log('📊 Cached results found:', cachedResults ? cachedResults.length : 0);
+    
+    if (cachedResults && cachedResults.length > 0) {
+      console.log('✅ Using cached sentiment results:', cachedResults.length, 'results');
+      
+      // The cache already contains the correct linking state, so use it directly
+      console.log('🔗 Using cached linking state directly (no linkedPairs dependency)');
+      
+      const resultsWithLinkedState = cachedResults.map(result => {
+        console.log(`📋 Cached result: ${result.marketQuestion.substring(0, 30)} - isLinked: ${result.isLinked}`);
+        return { ...result }; // Use the cached linking state directly
+      });
+      
+      // Sort by correlation (highest first) to maintain proper order
+      const sortedResults = resultsWithLinkedState
+        .sort((a, b) => b.correlation - a.correlation)
+        .slice(0, 15);
+      
+      console.log('📋 Final results with linking state:', sortedResults.map(r => ({ 
+        question: r.marketQuestion.substring(0, 30), 
+        isLinked: r.isLinked 
+      })));
+      
+      setSentimentResults(sortedResults);
+      setFilteredSentimentResults(sortedResults); // Ensure filtered results are updated immediately
+      
+      // Restore linkedPairs from cached results to maintain state consistency
+      const eventId = currentEvent?.id;
+      if (eventId && sortedResults.length > 0) {
+        const linkedResults = sortedResults.filter(r => r.isLinked);
+        if (linkedResults.length > 0) {
+          const restoredPairs = linkedResults.map(result => ({
+            marketId: result.marketId,
+            marketQuestion: result.marketQuestion,
+            gdeltQuery: result.gdeltQuery,
+            correlation: result.correlation,
+            keywords: result.keywords,
+            isLinked: true
+          }));
+          
+          setLinkedPairs(prev => {
+            const newMap = new Map(prev);
+            newMap.set(eventId, restoredPairs);
+            console.log('🔄 Restored linkedPairs from cached results:', restoredPairs.length, 'pairs');
+            return newMap;
+          });
+        }
+      }
+      
+      setLoadingSentiment(false);
+      return;
+    }
+    
+    console.log('🔄 No cached results found, generating new sentiment analysis...');
     setLoadingSentiment(true);
     setSentimentResults([]);
     
@@ -619,6 +705,10 @@ You must always return only a JSON array of 5 strings that match the above rules
                 .slice(0, 15);
               
               console.log(`🔄 Updated sentiment results: ${sortedResults.length} total results`);
+              
+              // Also update filtered results immediately
+              setFilteredSentimentResults(sortedResults);
+              
               return sortedResults;
             });
           }
@@ -637,13 +727,60 @@ You must always return only a JSON array of 5 strings that match the above rules
       
       console.log(`🏁 All sentiment analysis completed. Total results: ${totalResults.length}`);
       
+      // Cache the results for future use with current linked state
+      if (totalResults.length > 0) {
+        // Apply current linked state to results before caching
+        const eventId = currentEvent?.id;
+        const linkedPairsForEvent = linkedPairs.get(eventId || '') || [];
+        
+        const resultsWithLinkedState = totalResults.map(result => {
+          const isLinked = linkedPairsForEvent.some(pair => 
+            pair.marketId === result.marketId && pair.gdeltQuery === result.gdeltQuery
+          );
+          return { ...result, isLinked };
+        });
+        
+        setSentimentCache(prevCache => {
+          const newCache = new Map(prevCache);
+          newCache.set(cacheKey, resultsWithLinkedState);
+          console.log('💾 Cached sentiment results with linked state for future use');
+          console.log('📋 Cached results:', resultsWithLinkedState.map(r => ({ 
+            question: r.marketQuestion.substring(0, 30), 
+            isLinked: r.isLinked 
+          })));
+          return newCache;
+        });
+        
+        // Also restore linkedPairs from the cached results to maintain state consistency
+        if (eventId && resultsWithLinkedState.length > 0) {
+          const linkedResults = resultsWithLinkedState.filter(r => r.isLinked);
+          if (linkedResults.length > 0) {
+            const restoredPairs = linkedResults.map(result => ({
+              marketId: result.marketId,
+              marketQuestion: result.marketQuestion,
+              gdeltQuery: result.gdeltQuery,
+              correlation: result.correlation,
+              keywords: result.keywords,
+              isLinked: true
+            }));
+            
+            setLinkedPairs(prev => {
+              const newMap = new Map(prev);
+              newMap.set(eventId, restoredPairs);
+              console.log('🔄 Restored linkedPairs from cache:', restoredPairs.length, 'pairs');
+              return newMap;
+            });
+          }
+        }
+      }
+      
     } catch (error) {
       console.error('Error in sentiment analysis:', error);
     } finally {
       setLoadingSentiment(false);
       console.log('🏁 Sentiment analysis completed');
     }
-  }, [generateQueries, fetchGDELTData, fetchPriceHistory]);
+  }, [generateQueries, fetchGDELTData, fetchPriceHistory, sentimentCache, linkedPairs, currentEvent]);
 
   // Helper function to calculate correlation using CCA component exactly as in analysis.tsx
   const calculateCorrelation = useCallback((seriesA: any[], seriesB: any[]): Promise<number> => {
@@ -719,14 +856,38 @@ You must always return only a JSON array of 5 strings that match the above rules
     });
     
     // Update the result to show it's linked
-    setSentimentResults(prev => 
-      prev.map(r => 
+    setSentimentResults(prev => {
+      const updated = prev.map(r => 
         r.marketId === result.marketId && r.gdeltQuery === result.gdeltQuery
           ? { ...r, isLinked: true }
           : r
-      )
-    );
-  }, [currentEvent]);
+      );
+      // Also update filtered results to ensure UI reflects the change immediately
+      setFilteredSentimentResults(updated);
+      return updated;
+    });
+    
+    // Update the cache with the new linking state
+    const cacheKey = currentMarkets.slice(0, 5).map(m => m.id || m.question).join('_');
+    console.log('🔗 Updating cache for key:', cacheKey);
+    setSentimentCache(prevCache => {
+      const newCache = new Map(prevCache);
+      const cachedResults = newCache.get(cacheKey);
+      if (cachedResults) {
+        console.log('📝 Found cached results, updating linking state');
+        const updatedResults = cachedResults.map(r => 
+          r.marketId === result.marketId && r.gdeltQuery === result.gdeltQuery
+            ? { ...r, isLinked: true }
+            : r
+        );
+        newCache.set(cacheKey, updatedResults);
+        console.log('✅ Cache updated with linking state');
+      } else {
+        console.log('⚠️ No cached results found for key:', cacheKey);
+      }
+      return newCache;
+    });
+  }, [currentEvent, currentMarkets]);
 
   // Unlink sentiment functionality
   const unlinkSentiment = useCallback((result: SentimentResult) => {
@@ -745,26 +906,48 @@ You must always return only a JSON array of 5 strings that match the above rules
     });
     
     // Update the result to show it's unlinked
-    setSentimentResults(prev => 
-      prev.map(r => 
+    setSentimentResults(prev => {
+      const updated = prev.map(r => 
         r.marketId === result.marketId && r.gdeltQuery === result.gdeltQuery
           ? { ...r, isLinked: false }
           : r
-      )
-    );
-  }, [currentEvent]);
+      );
+      // Also update filtered results to ensure UI reflects the change immediately
+      setFilteredSentimentResults(updated);
+      return updated;
+    });
+    
+    // Update the cache with the new linking state
+    const cacheKey = currentMarkets.slice(0, 5).map(m => m.id || m.question).join('_');
+    console.log('🔗 Updating cache for unlink, key:', cacheKey);
+    setSentimentCache(prevCache => {
+      const newCache = new Map(prevCache);
+      const cachedResults = newCache.get(cacheKey);
+      if (cachedResults) {
+        console.log('📝 Found cached results, updating unlink state');
+        const updatedResults = cachedResults.map(r => 
+          r.marketId === result.marketId && r.gdeltQuery === result.gdeltQuery
+            ? { ...r, isLinked: false }
+            : r
+        );
+        newCache.set(cacheKey, updatedResults);
+        console.log('✅ Cache updated with unlink state');
+      } else {
+        console.log('⚠️ No cached results found for key:', cacheKey);
+      }
+      return newCache;
+    });
+  }, [currentEvent, currentMarkets]);
 
   // Memoize chart data to prevent recalculation on every render
   const chartData = useMemo(() => {
     const isSingleMarket = currentMarkets.length === 1;
     const data = createOptimizedDataset(allTimeSeries, isSingleMarket);
-    console.log(`Chart data created: ${data.length} points for interval ${selectedInterval}`);
     return data;
   }, [allTimeSeries, createOptimizedDataset, currentMarkets.length, selectedInterval]);
 
   // Memoize the entire chart component with responsive tooltip
   const renderTimeSeriesGraph = useMemo(() => {
-    console.log(`Rendering chart: allTimeSeries.length=${allTimeSeries.length}, chartData.length=${chartData.length}`);
     if (allTimeSeries.length === 0) return null;
 
     const isSingleMarket = currentMarkets.length === 1;
