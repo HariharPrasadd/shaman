@@ -1,7 +1,4 @@
 {
-  "env": {
-    "VITE_GEMINI_API_KEY": "AIzaSyDdj_m6mqeMDpwYoIHkWFSGoyNcj8WR5ZQ"
-  },
   "rewrites": [
     {
       "source": "/api/:path*",
