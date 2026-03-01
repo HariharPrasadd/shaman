@@ -1,11 +1,9 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import ReactDOM from 'react-dom/client';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import Fuse from "fuse.js";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { X, Plus, TrendingUp, DollarSign, Search, Link as LinkIcon, HelpCircle, Unlink } from 'lucide-react';
 import { Skeleton } from './components/ui/skeleton';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import CCA from './cca';
 
 // Interfaces for sentiment analysis
 interface GDELTTimelineEntry {
@@ -33,10 +31,19 @@ interface MarketQueryPair {
   isLinked: boolean;
 }
 
+interface SentimentProgress {
+  phase: 'idle' | 'generating' | 'fetching' | 'scoring' | 'finalizing';
+  completedMarkets: number;
+  totalMarkets: number;
+  completedQueries: number;
+  totalQueries: number;
+}
+
 function App() {
   const [data, setData] = useState<any[]>([]);
-  const [searchResults, setSearchResults] = useState(data);
   const [searchTerm, setSearchTerm] = useState('');
+  const [loadingEvents, setLoadingEvents] = useState<boolean>(true);
+  const [loadedEventsCount, setLoadedEventsCount] = useState<number>(0);
   
   // Modified state for top 5 time series
   const [allTimeSeries, setAllTimeSeries] = useState<any[]>([]);
@@ -54,17 +61,23 @@ function App() {
   // Sentiment analysis state
   const [sentimentResults, setSentimentResults] = useState<SentimentResult[]>([]);
   const [loadingSentiment, setLoadingSentiment] = useState<boolean>(false);
+  const [sentimentProgress, setSentimentProgress] = useState<SentimentProgress>({
+    phase: 'idle',
+    completedMarkets: 0,
+    totalMarkets: 0,
+    completedQueries: 0,
+    totalQueries: 0
+  });
   const [linkedPairs, setLinkedPairs] = useState<Map<string, MarketQueryPair[]>>(new Map());
-  const [sentimentCache, setSentimentCache] = useState<Map<string, SentimentResult[]>>(new Map());
   
   // Cache for price history data - key: "marketId_interval_fidelity", value: { data, timestamp }
-  const [priceHistoryCache, setPriceHistoryCache] = useState<Map<string, { data: any, timestamp: number }>>(new Map());
-  
-  // Cache for event data to prevent re-fetching
-  const [eventDataCache, setEventDataCache] = useState<Map<string, any[]>>(new Map());
+  const priceHistoryCacheRef = useRef<Map<string, { data: any, timestamp: number }>>(new Map());
+  const sentimentCacheRef = useRef<Map<string, SentimentResult[]>>(new Map());
+  const queryGenerationCacheRef = useRef<Map<string, string[]>>(new Map());
+  const gdeltCacheRef = useRef<Map<string, GDELTTimelineEntry[]>>(new Map());
   
   // Cache for noisy data visualizations - key: "eventId_marketKey_query", value: { data: noisyData, color: string }
-  const [noisyDataCache, setNoisyDataCache] = useState<Map<string, { data: any[], color: string }>>(new Map());
+  const noisyDataCacheRef = useRef<Map<string, { data: any[], color: string }>>(new Map());
   
   // Sentiment search state
   const [sentimentSearchTerm, setSentimentSearchTerm] = useState<string>('');
@@ -82,42 +95,80 @@ function App() {
   };
 
   useEffect(() => {
+    let isCancelled = false;
+    const CACHE_KEY = 'shaman_main_events_v1';
+    const MAX_CACHE_AGE_MS = 5 * 60 * 1000;
+
     const fetchAll = async () => {
-      // Check if we have cached data
-      const cacheKey = 'main_events';
-      const cachedData = eventDataCache.get(cacheKey);
-      
-      if (cachedData && cachedData.length > 0) {
-        console.log('✅ Using cached event data');
-        setData(cachedData);
-        return;
+      setLoadingEvents(true);
+      setLoadedEventsCount(0);
+
+      try {
+        const cachedRaw = sessionStorage.getItem(CACHE_KEY);
+        if (cachedRaw) {
+          const cached = JSON.parse(cachedRaw) as { timestamp: number; data: any[] };
+          if (cached?.data?.length && Date.now() - cached.timestamp < MAX_CACHE_AGE_MS) {
+            if (!isCancelled) {
+              setData(cached.data);
+              setLoadedEventsCount(cached.data.length);
+              setLoadingEvents(false);
+            }
+            return;
+          }
+        }
+
+        const limit = 500;
+        let offset = 0;
+        let allData: any[] = [];
+
+        while (true) {
+          const response = await fetch(`/api/events?closed=false&limit=${limit}&offset=${offset}`);
+          if (!response.ok) {
+            throw new Error(`Failed to load events: ${response.status}`);
+          }
+
+          const batch = await response.json();
+          if (!Array.isArray(batch) || batch.length === 0) break;
+          allData = allData.concat(batch);
+
+          if (!isCancelled) {
+            setData([...allData]);
+            setLoadedEventsCount(allData.length);
+          }
+
+          if (batch.length < limit) break;
+          offset += limit;
+        }
+
+        try {
+          sessionStorage.setItem(
+            CACHE_KEY,
+            JSON.stringify({ timestamp: Date.now(), data: allData })
+          );
+        } catch (storageError) {
+          // Ignore storage quota issues and continue with in-memory data.
+          console.warn('Event cache write skipped:', storageError);
+        }
+      } catch (error) {
+        console.error('Failed to load events:', error);
+      } finally {
+        if (!isCancelled) {
+          setLoadingEvents(false);
+        }
       }
-      
-      console.log('🔄 Fetching fresh event data...');
-      const limit = 500;
-      let offset = 0;
-      let allData: React.SetStateAction<any[]> = [];
-      while (true) {
-        const response = await fetch(`/api/events?closed=false&limit=${limit}&offset=${offset}`);
-        const batch = await response.json();
-        if (!batch || batch.length === 0) break;
-        allData = allData.concat(batch);
-        if (batch.length < limit) break;
-        offset += limit;
-      }
-      
-      setData(allData);
-      
-      // Cache the data
-      setEventDataCache(prevCache => {
-        const newCache = new Map(prevCache);
-        newCache.set(cacheKey, allData);
-        console.log('💾 Cached event data');
-        return newCache;
-      });
     };
-    fetchAll().catch(err => console.error('Failed to fetch data:', err));
-  }, [eventDataCache]);
+
+    fetchAll().catch((err) => {
+      if (!isCancelled) {
+        setLoadingEvents(false);
+        console.error('Failed to load events:', err);
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
 
   // Memoize Fuse instance to avoid recreating it on every render
   const fuse = useMemo(() => {
@@ -147,19 +198,18 @@ function App() {
     return new Fuse(sentimentResults, options);
   }, [sentimentResults]);
 
-  // Debounced search with useMemo for performance
-  const debouncedSearchResults = useMemo(() => {
-    if (searchTerm.length === 0) return [];
-    const results = fuse.search(searchTerm);
+  const searchResults = useMemo(() => {
+    const trimmed = searchTerm.trim();
+    if (trimmed.length === 0 || data.length === 0) return [];
+    const results = fuse.search(trimmed);
     return results.map((result) => result.item).slice(0, 10);
   }, [searchTerm, fuse]);
 
-  // Optimized search handler with debouncing
+  // Optimized search handler
   const handleSearch = useCallback((event: { target: { value: string; }; }) => {
     const { value } = event.target;
     setSearchTerm(value);
-    setSearchResults(value.length === 0 ? [] : debouncedSearchResults);
-  }, [debouncedSearchResults]);
+  }, []);
 
   // Sentiment search handler
   const handleSentimentSearch = useCallback((event: { target: { value: string; }; }) => {
@@ -191,7 +241,7 @@ function App() {
     
     // Check if data exists in cache and is still fresh (cache for 5 minutes)
     const cacheExpiry = 5 * 60 * 1000; // 5 minutes in milliseconds
-    const cachedData = priceHistoryCache.get(cacheKey);
+    const cachedData = priceHistoryCacheRef.current.get(cacheKey);
     
     if (cachedData && (now - cachedData.timestamp) < cacheExpiry) {
       console.log(`Using cached data for ${cacheKey}`);
@@ -210,12 +260,7 @@ function App() {
       
       const priceData = await response.json();
       
-      // Store in cache
-      setPriceHistoryCache(prev => {
-        const newCache = new Map(prev);
-        newCache.set(cacheKey, { data: priceData, timestamp: now });
-        return newCache;
-      });
+      priceHistoryCacheRef.current.set(cacheKey, { data: priceData, timestamp: now });
       
       return priceData;
       
@@ -223,7 +268,7 @@ function App() {
       console.error(`Error fetching price history for CLOB ID ${clobID}:`, error);
       return null;
     }
-  }, [priceHistoryCache]);
+  }, []);
 
   // Modified to create dataset for top 5 series or single market with two CLOB IDs
   const createOptimizedDataset = useCallback((allSeries: any[], isSingleMarket: boolean = false) => {
@@ -295,7 +340,7 @@ function App() {
       if (isSingleMarket) {
         // For single market, fetch both CLOB IDs (Yes and No)
         const market = markets[0];
-        const clobIds = JSON.parse(market.clobTokenIds);
+        const clobIds = parseClobTokenIds(market.clobTokenIds);
         
         if (clobIds.length >= 2) {
           const [yesPriceData, noPriceData] = await Promise.all([
@@ -337,7 +382,7 @@ function App() {
         console.log(`Processing only top 5 markets (${top5Markets.length}) out of ${markets.length} total markets`);
         
         const allSeriesPromises = top5Markets.map(async (market) => {
-          const clobIds = JSON.parse(market.clobTokenIds);
+          const clobIds = parseClobTokenIds(market.clobTokenIds);
           const priceData = await fetchPriceHistory(clobIds[0], interval, fidelity);
           
           if (priceData?.history?.length > 0) {
@@ -396,11 +441,59 @@ function App() {
   }, [watchlist]);
 
   // Gemini API integration for generating GDELT queries
+  const buildFallbackQueries = useCallback((naturalLanguageQuery: string): string[] => {
+    const cleaned = naturalLanguageQuery
+      .toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean)
+      .filter((word) => word.length > 2);
+
+    const uniqueWords = Array.from(new Set(cleaned)).slice(0, 6);
+    const w1 = uniqueWords[0] || 'market';
+    const w2 = uniqueWords[1] || 'prediction';
+    const w3 = uniqueWords[2] || 'odds';
+    const w4 = uniqueWords[3] || 'outcome';
+
+    return [
+      `"${w1} "`,
+      `"${w1} ${w2}"`,
+      `(${w1} OR ${w2})`,
+      `("${w1} ${w2}" OR ${w3})`,
+      `("${w1} ${w2}" OR "${w3} ${w4}")`,
+    ];
+  }, []);
+
+  const parseQueryArray = useCallback((raw: string): string[] => {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.map((q) => String(q)).filter(Boolean);
+      }
+      return [];
+    } catch {
+      const arrayMatch = raw.match(/\[[\s\S]*\]/);
+      if (!arrayMatch) return [];
+      try {
+        const parsed = JSON.parse(arrayMatch[0]);
+        return Array.isArray(parsed) ? parsed.map((q) => String(q)).filter(Boolean) : [];
+      } catch {
+        return [];
+      }
+    }
+  }, []);
+
   const generateQueries = useCallback(async (naturalLanguageQuery: string): Promise<string[]> => {
+    const cachedQueries = queryGenerationCacheRef.current.get(naturalLanguageQuery);
+    if (cachedQueries && cachedQueries.length) {
+      return cachedQueries;
+    }
+
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    
     if (!apiKey) {
-      throw new Error('VITE_GEMINI_API_KEY not found in environment variables');
+      const fallbackQueries = buildFallbackQueries(naturalLanguageQuery);
+      queryGenerationCacheRef.current.set(naturalLanguageQuery, fallbackQueries);
+      return fallbackQueries;
     }
     const genAI = new GoogleGenerativeAI(apiKey);
     
@@ -447,18 +540,24 @@ You must always return only a JSON array of 5 strings that match the above rules
     
     const prompt = `${systemPrompt}\n\nInput: ${naturalLanguageQuery}`;
     
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
-    
-    const queries = JSON.parse(text);
-    
-    if (!Array.isArray(queries) || queries.length !== 5) {
-      throw new Error(`Expected 5 queries, got ${queries.length}`);
+    try {
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
+      const parsedQueries = parseQueryArray(text);
+      const queries = parsedQueries.length >= 5
+        ? parsedQueries.slice(0, 5)
+        : buildFallbackQueries(naturalLanguageQuery);
+
+      queryGenerationCacheRef.current.set(naturalLanguageQuery, queries);
+      return queries;
+    } catch (error) {
+      console.warn('Falling back to local query generation:', error);
+      const fallbackQueries = buildFallbackQueries(naturalLanguageQuery);
+      queryGenerationCacheRef.current.set(naturalLanguageQuery, fallbackQueries);
+      return fallbackQueries;
     }
-    
-    return queries;
-  }, []);
+  }, [buildFallbackQueries, parseQueryArray]);
 
   // GDELT API integration - using the exact same class from gemini-query.tsx
   class GDELTMonthlyFetcher {
@@ -540,53 +639,225 @@ You must always return only a JSON array of 5 strings that match the above rules
   }
 
   const fetchGDELTData = useCallback(async (query: string, timeLength: string = '1w'): Promise<GDELTTimelineEntry[]> => {
+    const cacheKey = `${query}_${timeLength}`;
+    const cachedData = gdeltCacheRef.current.get(cacheKey);
+    if (cachedData) {
+      return cachedData;
+    }
+
     const fetcher = new GDELTMonthlyFetcher();
-    return await fetcher.fetchData(query, timeLength, '', '');
+    const data = await fetcher.fetchData(query, timeLength, '', '');
+    gdeltCacheRef.current.set(cacheKey, data);
+    return data;
   }, []);
+
+  const parseGDELTTimestamp = useCallback((raw: string): number => {
+    const directParsed = new Date(raw).getTime();
+    if (!Number.isNaN(directParsed)) return directParsed;
+
+    const m = raw.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
+    if (!m) return Date.now();
+
+    return Date.UTC(
+      Number(m[1]),
+      Number(m[2]) - 1,
+      Number(m[3]),
+      Number(m[4]),
+      Number(m[5]),
+      Number(m[6])
+    );
+  }, []);
+
+  const parseClobTokenIds = useCallback((raw: unknown): string[] => {
+    if (Array.isArray(raw)) {
+      return raw.map((id) => String(id)).filter(Boolean);
+    }
+    if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed.map((id) => String(id)).filter(Boolean);
+        }
+      } catch {
+        return raw.split(',').map((v) => v.trim()).filter(Boolean);
+      }
+    }
+    return [];
+  }, []);
+
+  const calculatePearson = useCallback((x: number[], y: number[]): number => {
+    if (x.length !== y.length || x.length < 2) return 0;
+    const meanX = x.reduce((sum, value) => sum + value, 0) / x.length;
+    const meanY = y.reduce((sum, value) => sum + value, 0) / y.length;
+
+    let numerator = 0;
+    let denomX = 0;
+    let denomY = 0;
+
+    for (let i = 0; i < x.length; i++) {
+      const dx = x[i] - meanX;
+      const dy = y[i] - meanY;
+      numerator += dx * dy;
+      denomX += dx * dx;
+      denomY += dy * dy;
+    }
+
+    const denominator = Math.sqrt(denomX * denomY);
+    return denominator === 0 ? 0 : numerator / denominator;
+  }, []);
+
+  const calculateSpearman = useCallback((x: number[], y: number[]): number => {
+    if (x.length !== y.length || x.length < 2) return 0;
+    const rank = (values: number[]) => {
+      const sorted = values
+        .map((value, index) => ({ value, index }))
+        .sort((a, b) => a.value - b.value);
+      const ranks = new Array(values.length).fill(0);
+      for (let i = 0; i < sorted.length; i++) {
+        ranks[sorted[i].index] = i + 1;
+      }
+      return ranks;
+    };
+    return calculatePearson(rank(x), rank(y));
+  }, [calculatePearson]);
+
+  const directionalAgreement = useCallback((x: number[], y: number[]): number => {
+    if (x.length !== y.length || x.length === 0) return 0;
+    let sameDirectionCount = 0;
+    for (let i = 0; i < x.length; i++) {
+      if ((x[i] >= 0 && y[i] >= 0) || (x[i] < 0 && y[i] < 0)) {
+        sameDirectionCount += 1;
+      }
+    }
+    return sameDirectionCount / x.length;
+  }, []);
+
+  const calculatePredictiveScore = useCallback((seriesA: any[], seriesB: any[]): number => {
+    if (!seriesA?.length || !seriesB?.length) return 0;
+
+    const valuesA = seriesA
+      .map((point) => point?.value)
+      .filter((value: unknown): value is number => typeof value === 'number' && Number.isFinite(value));
+    const valuesB = seriesB
+      .map((point) => point?.value)
+      .filter((value: unknown): value is number => typeof value === 'number' && Number.isFinite(value));
+
+    const maxWindow = 600;
+    const minLength = Math.min(valuesA.length, valuesB.length, maxWindow);
+    if (minLength < 20) return 0;
+
+    const sampleA = valuesA.slice(-minLength);
+    const sampleB = valuesB.slice(-minLength);
+    const maxLag = 12;
+    let bestScore = 0;
+
+    for (let lag = -maxLag; lag <= maxLag; lag++) {
+      let alignedA = sampleA;
+      let alignedB = sampleB;
+
+      if (lag > 0) {
+        alignedA = sampleA.slice(lag);
+        alignedB = sampleB.slice(0, sampleB.length - lag);
+      } else if (lag < 0) {
+        const shift = Math.abs(lag);
+        alignedA = sampleA.slice(0, sampleA.length - shift);
+        alignedB = sampleB.slice(shift);
+      }
+
+      if (alignedA.length < 20 || alignedB.length < 20) continue;
+
+      const returnsA = alignedA.slice(1).map((value, index) => value - alignedA[index]);
+      const returnsB = alignedB.slice(1).map((value, index) => value - alignedB[index]);
+      if (returnsA.length < 10 || returnsB.length < 10) continue;
+
+      const levelPearson = Math.abs(calculatePearson(alignedA, alignedB));
+      const returnPearson = Math.abs(calculatePearson(returnsA, returnsB));
+      const spearman = Math.abs(calculateSpearman(alignedA, alignedB));
+      const direction = directionalAgreement(returnsA, returnsB);
+
+      const weightedScore = (
+        returnPearson * 0.45 +
+        levelPearson * 0.25 +
+        spearman * 0.2 +
+        direction * 0.1
+      ) * 100;
+
+      if (weightedScore > bestScore) {
+        bestScore = weightedScore;
+      }
+    }
+
+    return Number.isFinite(bestScore) ? Math.max(0, Math.min(100, bestScore)) : 0;
+  }, [calculatePearson, calculateSpearman, directionalAgreement]);
 
   // Optimized sentiment analysis function with caching and parallel processing
   const performSentimentAnalysis = useCallback(async (markets: any[]) => {
-    console.log('🚀 Starting optimized sentiment analysis for markets:', markets.length);
     if (!markets || markets.length === 0) return;
-    
-    // Create cache key from market IDs
-    const cacheKey = markets.slice(0, 5).map(m => m.id || m.question).join('_');
-    
-    // Check if we have cached results for this set of markets
-    const cachedResults = sentimentCache.get(cacheKey);
-    console.log('🔍 Checking cache for key:', cacheKey);
-    console.log('📊 Cached results found:', cachedResults ? cachedResults.length : 0);
-    
+
+    const cacheKey = markets.slice(0, 5).map((m) => m.id || m.question).join('_');
+    const eventId = currentEvent?.id || '';
+
+    const cachedResults = sentimentCacheRef.current.get(cacheKey);
     if (cachedResults && cachedResults.length > 0) {
-      console.log('✅ Using cached sentiment results:', cachedResults.length, 'results');
-      
-      // The cache already contains the correct linking state, so use it directly
-      console.log('🔗 Using cached linking state directly (no linkedPairs dependency)');
-      
-      const resultsWithLinkedState = cachedResults.map(result => {
-        console.log(`📋 Cached result: ${result.marketQuestion.substring(0, 30)} - isLinked: ${result.isLinked}`);
-        return { ...result }; // Use the cached linking state directly
+      const sortedCached = [...cachedResults].sort((a, b) => b.correlation - a.correlation).slice(0, 15);
+      setSentimentResults(sortedCached);
+      setFilteredSentimentResults(sortedCached);
+      setSentimentProgress({
+        phase: 'idle',
+        completedMarkets: 0,
+        totalMarkets: 0,
+        completedQueries: 0,
+        totalQueries: 0
       });
-      
-      // Sort by correlation (highest first) to maintain proper order
-      const sortedResults = resultsWithLinkedState
-        .sort((a, b) => b.correlation - a.correlation)
-        .slice(0, 15);
-      
-      console.log('📋 Final results with linking state:', sortedResults.map(r => ({ 
-        question: r.marketQuestion.substring(0, 30), 
-        isLinked: r.isLinked 
-      })));
-      
-      setSentimentResults(sortedResults);
-      setFilteredSentimentResults(sortedResults); // Ensure filtered results are updated immediately
-      
-      // Restore linkedPairs from cached results to maintain state consistency
-      const eventId = currentEvent?.id;
-      if (eventId && sortedResults.length > 0) {
-        const linkedResults = sortedResults.filter(r => r.isLinked);
+      return;
+    }
+
+    setLoadingSentiment(true);
+    setSentimentResults([]);
+    setFilteredSentimentResults([]);
+
+    const dedupeAndSort = (results: SentimentResult[]) => {
+      const byKey = new Map<string, SentimentResult>();
+      for (const result of results) {
+        const key = `${result.marketId}__${result.gdeltQuery}`;
+        const existing = byKey.get(key);
+        if (!existing || result.correlation > existing.correlation) {
+          byKey.set(key, result);
+        }
+      }
+      return Array.from(byKey.values()).sort((a, b) => b.correlation - a.correlation).slice(0, 15);
+    };
+
+    const applyLinkingState = (results: SentimentResult[]) => {
+      const linkedPairsForEvent = linkedPairs.get(eventId) || [];
+      let withLinks = results.map((result) => ({
+        ...result,
+        isLinked: linkedPairsForEvent.some(
+          (pair) => pair.marketId === result.marketId && pair.gdeltQuery === result.gdeltQuery
+        )
+      }));
+
+      if (eventId && linkedPairsForEvent.length === 0 && withLinks.length > 0) {
+        const top = withLinks[0];
+        withLinks = withLinks.map((result) =>
+          result.marketId === top.marketId && result.gdeltQuery === top.gdeltQuery
+            ? { ...result, isLinked: true }
+            : result
+        );
+      }
+      return withLinks;
+    };
+
+    const publishResults = (results: SentimentResult[]) => {
+      const linked = applyLinkingState(dedupeAndSort(results));
+      setSentimentResults(linked);
+      setFilteredSentimentResults(linked);
+      sentimentCacheRef.current.set(cacheKey, linked);
+
+      if (eventId) {
+        const linkedResults = linked.filter((result) => result.isLinked);
         if (linkedResults.length > 0) {
-          const restoredPairs = linkedResults.map(result => ({
+          const restoredPairs = linkedResults.map((result) => ({
             marketId: result.marketId,
             marketQuestion: result.marketQuestion,
             gdeltQuery: result.gdeltQuery,
@@ -594,217 +865,173 @@ You must always return only a JSON array of 5 strings that match the above rules
             keywords: result.keywords,
             isLinked: true
           }));
-          
-          setLinkedPairs(prev => {
-            const newMap = new Map(prev);
-            newMap.set(eventId, restoredPairs);
-            console.log('🔄 Restored linkedPairs from cached results:', restoredPairs.length, 'pairs');
-            return newMap;
+          setLinkedPairs((prev) => {
+            const next = new Map(prev);
+            next.set(eventId, restoredPairs);
+            return next;
           });
         }
       }
-      
-      setLoadingSentiment(false);
-      return;
-    }
-    
-    console.log('🔄 No cached results found, generating new sentiment analysis...');
-    setLoadingSentiment(true);
-    setSentimentResults([]);
-    
-    try {
-      // Only process top 5 markets for performance
-      const top5Markets = markets.slice(0, 5);
-      console.log(`Processing only top 5 markets (${top5Markets.length}) out of ${markets.length} total markets`);
-      
-      // Process all markets in parallel for maximum speed
-      const marketPromises = top5Markets.map(async (market) => {
-        try {
-          console.log(`🔄 Processing market: ${market.question.substring(0, 50)}...`);
-          
-          // Generate GDELT queries using Gemini
-          const gdeltQueries = await generateQueries(market.question);
-          console.log(`Generated ${gdeltQueries.length} GDELT queries for market`);
-          
-          // Limit to first 3 queries per market for speed (reduced from 5)
-          const limitedQueries = gdeltQueries.slice(0, 3);
-          console.log(`Processing only first 3 queries (${limitedQueries.length}) out of ${gdeltQueries.length} total queries`);
-          
-          // Pre-fetch market price data once per market (not per query)
-          const clobIds = JSON.parse(market.clobTokenIds);
-          const marketPriceData = await fetchPriceHistory(clobIds[0], '1m', '180');
-          
-          if (!marketPriceData?.history?.length) {
-            console.log(`No market price data found for: ${market.question}`);
-            return [];
-          }
-          
-          // Convert market data once
-          const marketSeries = marketPriceData.history.map((point: any) => ({
-            timestamp: point.t * 1000,
-            value: point.p
-          }));
-          
-          console.log(`Market series length: ${marketSeries.length}`);
-          
-          // Process all queries for this market in parallel
-          const queryPromises = limitedQueries.map(async (query) => {
-            try {
-              const gdeltData = await fetchGDELTData(query, '1m');
-              
-              if (gdeltData.length === 0) {
-                console.log(`No GDELT data for query: ${query.substring(0, 30)}...`);
-                return null;
-              }
-              
-              // Convert GDELT data
-              const gdeltSeries = gdeltData.map((point: GDELTTimelineEntry) => ({
-                timestamp: new Date(point.date).getTime(),
-                value: point.value
-              }));
-              
-              // Calculate correlation using CCA
-              const correlation = await calculateCorrelation(marketSeries, gdeltSeries);
-              console.log(`Correlation calculated: ${correlation.toFixed(2)}%`);
-              
-              // Extract keywords from query
-              const keywords = extractKeywordsFromQuery(query);
-              
-              return {
-                marketId: market.id || market.question,
-                marketQuestion: market.question,
-                gdeltQuery: query,
-                correlation: correlation,
-                keywords: keywords,
-                isLinked: false
-              } as SentimentResult;
-              
-            } catch (error) {
-              console.error(`Error processing query "${query.substring(0, 30)}...":`, error);
-              return null;
-            }
-          });
-          
-          // Wait for all queries for this market to complete
-          const results = await Promise.all(queryPromises);
-          const validResults = results.filter(Boolean) as SentimentResult[];
-          
-          // Update state with results from this market immediately
-          if (validResults.length > 0) {
-            setSentimentResults(prevResults => {
-              const updatedResults = [...prevResults, ...validResults];
-              // Sort by correlation (highest first) and limit to 15 (reduced from 25)
-              const sortedResults = updatedResults
-                .sort((a, b) => b.correlation - a.correlation)
-                .slice(0, 15);
-              
-              console.log(`🔄 Updated sentiment results: ${sortedResults.length} total results`);
-              
-              // Also update filtered results immediately
-              setFilteredSentimentResults(sortedResults);
-              
-              return sortedResults;
-            });
-          }
-          
-          return validResults;
-          
-        } catch (error) {
-          console.error(`Error processing market ${market.question}:`, error);
-          return [];
+      return linked;
+    };
+
+    const runWithConcurrency = async <T,>(
+      tasks: Array<() => Promise<T>>,
+      limit: number
+    ): Promise<T[]> => {
+      const results = new Array<T>(tasks.length);
+      let cursor = 0;
+      const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+        while (cursor < tasks.length) {
+          const index = cursor++;
+          results[index] = await tasks[index]();
         }
       });
-      
-      // Wait for all markets to complete
-      const allResults = await Promise.all(marketPromises);
-      const totalResults = allResults.flat();
-      
-      console.log(`🏁 All sentiment analysis completed. Total results: ${totalResults.length}`);
-      
-      // Cache the results for future use with current linked state
-      if (totalResults.length > 0) {
-        // Apply current linked state to results before caching
-        const eventId = currentEvent?.id;
-        const linkedPairsForEvent = linkedPairs.get(eventId || '') || [];
-        
-        const resultsWithLinkedState = totalResults.map(result => {
-          const isLinked = linkedPairsForEvent.some(pair => 
-            pair.marketId === result.marketId && pair.gdeltQuery === result.gdeltQuery
-          );
-          return { ...result, isLinked };
-        });
-        
-        setSentimentCache(prevCache => {
-          const newCache = new Map(prevCache);
-          newCache.set(cacheKey, resultsWithLinkedState);
-          console.log('💾 Cached sentiment results with linked state for future use');
-          console.log('📋 Cached results:', resultsWithLinkedState.map(r => ({ 
-            question: r.marketQuestion.substring(0, 30), 
-            isLinked: r.isLinked 
-          })));
-          return newCache;
-        });
-        
-        // Also restore linkedPairs from the cached results to maintain state consistency
-        if (eventId && resultsWithLinkedState.length > 0) {
-          const linkedResults = resultsWithLinkedState.filter(r => r.isLinked);
-          if (linkedResults.length > 0) {
-            const restoredPairs = linkedResults.map(result => ({
-              marketId: result.marketId,
-              marketQuestion: result.marketQuestion,
-              gdeltQuery: result.gdeltQuery,
-              correlation: result.correlation,
-              keywords: result.keywords,
-              isLinked: true
-            }));
-            
-            setLinkedPairs(prev => {
-              const newMap = new Map(prev);
-              newMap.set(eventId, restoredPairs);
-              console.log('🔄 Restored linkedPairs from cache:', restoredPairs.length, 'pairs');
-              return newMap;
-            });
+      await Promise.all(workers);
+      return results;
+    };
+
+    const scoreMarketWithQueries = async (
+      market: any,
+      queries: string[],
+      onQueryDone: () => void
+    ): Promise<SentimentResult[]> => {
+      const clobIds = parseClobTokenIds(market.clobTokenIds);
+      if (!clobIds[0]) return [];
+
+      const marketPriceData = await fetchPriceHistory(clobIds[0], '1m', '180');
+      if (!marketPriceData?.history?.length) return [];
+
+      const marketSeries = marketPriceData.history.map((point: any) => ({
+        timestamp: point.t * 1000,
+        value: point.p
+      }));
+
+      const tasks = queries.map((query) => async () => {
+        let gdeltData = await fetchGDELTData(query, '1week');
+        if (gdeltData.length === 0) {
+          const broadFallbackQuery = market.question
+            .toLowerCase()
+            .replace(/[^\w\s]/g, ' ')
+            .split(/\s+/)
+            .filter(Boolean)
+            .slice(0, 4)
+            .join(' OR ');
+          if (broadFallbackQuery) {
+            gdeltData = await fetchGDELTData(`(${broadFallbackQuery})`, '1week');
           }
         }
+
+        const gdeltSeries = gdeltData.map((point: GDELTTimelineEntry) => ({
+          timestamp: parseGDELTTimestamp(point.date),
+          value: point.value
+        }));
+
+        const correlation = gdeltSeries.length > 0 ? calculatePredictiveScore(marketSeries, gdeltSeries) : 0;
+        const result: SentimentResult = {
+          marketId: market.id || market.question,
+          marketQuestion: market.question,
+          gdeltQuery: query,
+          correlation,
+          keywords: extractKeywordsFromQuery(query),
+          isLinked: false
+        };
+        onQueryDone();
+        return result;
+      });
+
+      const scored = await runWithConcurrency(tasks, 4);
+      return scored.filter(Boolean);
+    };
+
+    const topMarkets = markets.slice(0, 5);
+    const fastMarkets = topMarkets.slice(0, 3);
+    const fastQueriesPerMarket = 2;
+    const enrichQueriesPerMarket = 3;
+    const fastTotalQueries = fastMarkets.length * fastQueriesPerMarket;
+
+    try {
+      setSentimentProgress({
+        phase: 'fetching',
+        completedMarkets: 0,
+        totalMarkets: fastMarkets.length,
+        completedQueries: 0,
+        totalQueries: fastTotalQueries
+      });
+
+      const fastTasks = fastMarkets.map((market) => async () => {
+        const fallbackQueries = buildFallbackQueries(market.question).slice(0, fastQueriesPerMarket);
+        const results = await scoreMarketWithQueries(market, fallbackQueries, () => {
+          setSentimentProgress((prev) => ({
+            ...prev,
+            phase: 'scoring',
+            completedQueries: Math.min(prev.completedQueries + 1, prev.totalQueries)
+          }));
+        });
+        setSentimentProgress((prev) => ({
+          ...prev,
+          completedMarkets: prev.completedMarkets + 1
+        }));
+        return results;
+      });
+
+      const fastResults = (await runWithConcurrency(fastTasks, 3)).flat();
+      if (fastResults.length > 0) {
+        publishResults(fastResults);
       }
-      
     } catch (error) {
-      console.error('Error in sentiment analysis:', error);
+      console.error('Fast sentiment pass failed:', error);
     } finally {
       setLoadingSentiment(false);
-      console.log('🏁 Sentiment analysis completed');
+      setSentimentProgress({
+        phase: 'idle',
+        completedMarkets: 0,
+        totalMarkets: 0,
+        completedQueries: 0,
+        totalQueries: 0
+      });
     }
-  }, [generateQueries, fetchGDELTData, fetchPriceHistory, sentimentCache, linkedPairs, currentEvent]);
 
-  // Helper function to calculate correlation using CCA component exactly as in analysis.tsx
-  const calculateCorrelation = useCallback((seriesA: any[], seriesB: any[]): Promise<number> => {
-    return new Promise((resolve) => {
-      let correlation = 0;
-      
-      const handleCorrelationCalculated = (corr: number) => {
-        correlation = corr;
-      };
-      
-      // Create a temporary div and render CCA component
-      const tempDiv = document.createElement('div');
-      const root = ReactDOM.createRoot(tempDiv);
-      
-      root.render(
-        <CCA 
-          seriesA={seriesA}
-          seriesB={seriesB}
-          onCorrelationCalculated={handleCorrelationCalculated}
-          maxLag={10}
-        />
-      );
-      
-      // Wait for calculation to complete
-      setTimeout(() => {
-        root.unmount();
-        resolve(correlation);
-      }, 200);
-    });
-  }, []);
+    // Background enrichment with Gemini-generated queries.
+    void (async () => {
+      try {
+        const baseResults = sentimentCacheRef.current.get(cacheKey) || [];
+        const enrichTasks = topMarkets.map((market) => async () => {
+          let modelQueries: string[] = [];
+          try {
+            modelQueries = (await generateQueries(market.question)).slice(0, enrichQueriesPerMarket);
+          } catch {
+            modelQueries = buildFallbackQueries(market.question).slice(0, enrichQueriesPerMarket);
+          }
+
+          const existingKeys = new Set(
+            baseResults
+              .filter((result) => result.marketId === (market.id || market.question))
+              .map((result) => result.gdeltQuery)
+          );
+          const newQueries = modelQueries.filter((query) => !existingKeys.has(query));
+          if (newQueries.length === 0) return [];
+          return scoreMarketWithQueries(market, newQueries, () => undefined);
+        });
+
+        const enriched = (await runWithConcurrency(enrichTasks, 2)).flat();
+        if (enriched.length === 0) return;
+        publishResults([...baseResults, ...enriched]);
+      } catch (error) {
+        console.error('Background sentiment enrichment failed:', error);
+      }
+    })();
+  }, [
+    generateQueries,
+    fetchGDELTData,
+    fetchPriceHistory,
+    linkedPairs,
+    currentEvent,
+    calculatePredictiveScore,
+    parseGDELTTimestamp,
+    parseClobTokenIds,
+    buildFallbackQueries
+  ]);
 
   // Helper function to extract keywords from GDELT query
   const extractKeywordsFromQuery = useCallback((query: string): string[] => {
@@ -958,24 +1185,17 @@ You must always return only a JSON array of 5 strings that match the above rules
     
     // Update the cache with the new linking state
     const cacheKey = currentMarkets.slice(0, 5).map(m => m.id || m.question).join('_');
-    console.log('🔗 Updating cache for key:', cacheKey);
-    setSentimentCache(prevCache => {
-      const newCache = new Map(prevCache);
-      const cachedResults = newCache.get(cacheKey);
-      if (cachedResults) {
-        console.log('📝 Found cached results, updating linking state');
-        const updatedResults = cachedResults.map(r => 
+    const cachedResults = sentimentCacheRef.current.get(cacheKey);
+    if (cachedResults) {
+      sentimentCacheRef.current.set(
+        cacheKey,
+        cachedResults.map(r => 
           r.marketId === result.marketId && r.gdeltQuery === result.gdeltQuery
             ? { ...r, isLinked: true }
             : r
-        );
-        newCache.set(cacheKey, updatedResults);
-        console.log('✅ Cache updated with linking state');
-      } else {
-        console.log('⚠️ No cached results found for key:', cacheKey);
-      }
-      return newCache;
-    });
+        )
+      );
+    }
   }, [currentEvent, currentMarkets]);
 
   // Unlink sentiment functionality
@@ -1021,33 +1241,21 @@ You must always return only a JSON array of 5 strings that match the above rules
     }
     
     const noisyCacheKey = `${eventId}_${targetMarketKey}_${result.gdeltQuery}`;
-    setNoisyDataCache(prevCache => {
-      const newCache = new Map(prevCache);
-      newCache.delete(noisyCacheKey);
-      console.log('🗑️ Cleared noisy data cache for:', noisyCacheKey);
-      return newCache;
-    });
+    noisyDataCacheRef.current.delete(noisyCacheKey);
     
     // Update the cache with the new linking state
     const cacheKey = currentMarkets.slice(0, 5).map(m => m.id || m.question).join('_');
-    console.log('🔗 Updating cache for unlink, key:', cacheKey);
-    setSentimentCache(prevCache => {
-      const newCache = new Map(prevCache);
-      const cachedResults = newCache.get(cacheKey);
-      if (cachedResults) {
-        console.log('📝 Found cached results, updating unlink state');
-        const updatedResults = cachedResults.map(r => 
+    const cachedResults = sentimentCacheRef.current.get(cacheKey);
+    if (cachedResults) {
+      sentimentCacheRef.current.set(
+        cacheKey,
+        cachedResults.map(r => 
           r.marketId === result.marketId && r.gdeltQuery === result.gdeltQuery
             ? { ...r, isLinked: false }
             : r
-        );
-        newCache.set(cacheKey, updatedResults);
-        console.log('✅ Cache updated with unlink state');
-      } else {
-        console.log('⚠️ No cached results found for key:', cacheKey);
-      }
-      return newCache;
-    });
+        )
+      );
+    }
   }, [currentEvent, currentMarkets]);
 
   // Memoize chart data to prevent recalculation on every render
@@ -1096,7 +1304,7 @@ You must always return only a JSON array of 5 strings that match the above rules
       const cacheKey = `${eventId}_${targetMarketKey}_${linkedPair.gdeltQuery}`;
       
       // Check if we have cached noisy data
-      const cachedNoisyData = noisyDataCache.get(cacheKey);
+      const cachedNoisyData = noisyDataCacheRef.current.get(cacheKey);
       if (cachedNoisyData && cachedNoisyData.data.length > 0) {
         console.log('✅ Using cached noisy data for:', cacheKey);
         return {
@@ -1116,12 +1324,7 @@ You must always return only a JSON array of 5 strings that match the above rules
       
       // Cache the noisy data with its color
       if (noisyData.length > 0) {
-        setNoisyDataCache(prevCache => {
-          const newCache = new Map(prevCache);
-          newCache.set(cacheKey, { data: noisyData, color: randomColor });
-          console.log('💾 Cached noisy data with color for:', cacheKey, 'Color:', randomColor);
-          return newCache;
-        });
+        noisyDataCacheRef.current.set(cacheKey, { data: noisyData, color: randomColor });
       }
       
       return {
@@ -1134,7 +1337,7 @@ You must always return only a JSON array of 5 strings that match the above rules
     }).filter(Boolean); // Remove null entries
     
     return noisyDataSets;
-  }, [chartData, currentEvent, linkedPairs, sentimentResults, generateNoisyData, currentMarkets, noisyDataCache, generateRandomColor]);
+  }, [chartData, currentEvent, linkedPairs, sentimentResults, generateNoisyData, currentMarkets, generateRandomColor]);
 
   // Memoize the entire chart component with responsive tooltip
   const renderTimeSeriesGraph = useMemo(() => {
@@ -1237,6 +1440,9 @@ You must always return only a JSON array of 5 strings that match the above rules
               <h3 className="text-white text-2xl font-semibold  tracking-tight">
                 {selectedEventTitle || 'Price History'}
               </h3>
+              {loadingPrices && (
+                <p className="text-xs text-white/60 mt-1">Loading market price history...</p>
+              )}
             </div>
             
             {/* Interval buttons with shadcn styling */}
@@ -1445,13 +1651,12 @@ You must always return only a JSON array of 5 strings that match the above rules
         </div>
       </div>
     );
-  }, [allTimeSeries, chartData, noisyChartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, currentEvent, addToWatchlist, isInWatchlist, currentMarkets.length, linkedPairs, noisyDataCache, currentMarkets]);
+  }, [allTimeSeries, chartData, noisyChartData, loadingPrices, selectedEventTitle, selectedInterval, handleIntervalChange, currentEvent, addToWatchlist, isInWatchlist, currentMarkets.length, linkedPairs, currentMarkets]);
 
   // Modified click handler to store current markets and event
   const handleItemClick = useCallback((item: any) => {
     console.log(`\n=== Event: ${item.title || 'Untitled Event'} ===`);
     
-    setSearchResults([]);
     setSearchTerm('');
     setSelectedEventTitle(item.title || 'Untitled Event');
     setCurrentEvent(item);
@@ -1574,6 +1779,24 @@ You must always return only a JSON array of 5 strings that match the above rules
           </div>
           {loadingSentiment ? (
             <div className="space-y-4 mt-4">
+              <div className="text-xs text-white/60 space-y-1">
+                <div>
+                  {sentimentProgress.phase === 'generating' && 'Generating sentiment queries...'}
+                  {sentimentProgress.phase === 'fetching' && 'Fetching GDELT sentiment data...'}
+                  {sentimentProgress.phase === 'scoring' && 'Scoring market/sentiment alignment...'}
+                  {sentimentProgress.phase === 'finalizing' && 'Finalizing results...'}
+                </div>
+                {sentimentProgress.totalMarkets > 0 && (
+                  <div>
+                    Markets {sentimentProgress.completedMarkets}/{sentimentProgress.totalMarkets}
+                  </div>
+                )}
+                {sentimentProgress.totalQueries > 0 && (
+                  <div>
+                    Queries {sentimentProgress.completedQueries}/{sentimentProgress.totalQueries}
+                  </div>
+                )}
+              </div>
               {/* Generate 8 skeleton components */}
               {Array.from({ length: 8 }).map((_, index) => (
                 <div key={index} className="bg-white/5 border border-white/10 rounded-xl p-4">
@@ -1699,11 +1922,16 @@ You must always return only a JSON array of 5 strings that match the above rules
               <input 
                 className="w-full h-12 pl-12 pr-4 bg-white/5 border border-white/10 rounded-xl text-white placeholder:text-white/40 focus:outline-none focus:border-white/30 focus:bg-white/8 transition-all  backdrop-blur-sm"
                 type="text"
-                placeholder="Search for Polymarket events"
+                placeholder={loadingEvents ? "Loading Polymarket events..." : "Search for Polymarket events"}
                 value={searchTerm}
                 onChange={handleSearch}
               />
             </div>
+            {loadingEvents && (
+              <div className="text-xs text-white/60 mt-2">
+                Loading events... {loadedEventsCount > 0 ? `${loadedEventsCount} loaded` : ''}
+              </div>
+            )}
           </div>
 
           {searchResults.length > 0 && (
